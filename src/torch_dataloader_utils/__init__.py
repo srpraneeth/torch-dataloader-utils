@@ -1,5 +1,21 @@
+from torch_dataloader_utils.splits import (
+    DataFileInfo,
+    IcebergDataFileInfo,
+    Split,
+    SplitStrategy,
+    RoundRobinSplitStrategy,
+    SizeBalancedSplitStrategy,
+)
 from torch_dataloader_utils.dataset.structured import StructuredDataset
 from torch_dataloader_utils.dataset.iceberg import IcebergDataset
-from torch_dataloader_utils.split import Split
 
-__all__ = ["StructuredDataset", "IcebergDataset", "Split"]
+__all__ = [
+    "DataFileInfo",
+    "IcebergDataFileInfo",
+    "Split",
+    "SplitStrategy",
+    "RoundRobinSplitStrategy",
+    "SizeBalancedSplitStrategy",
+    "StructuredDataset",
+    "IcebergDataset",
+]
