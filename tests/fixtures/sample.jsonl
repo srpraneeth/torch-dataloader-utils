@@ -1,0 +1,5 @@
+{"feature_a": 1.0, "feature_b": 10, "label": 0}
+{"feature_a": 2.0, "feature_b": 20, "label": 1}
+{"feature_a": 3.0, "feature_b": 30, "label": 0}
+{"feature_a": 4.0, "feature_b": 40, "label": 1}
+{"feature_a": 5.0, "feature_b": 50, "label": 0}
