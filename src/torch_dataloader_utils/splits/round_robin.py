@@ -35,8 +35,17 @@ class RoundRobinSplitStrategy:
         for i, file in enumerate(file_list):
             splits[i % num_workers].file_splits.append(FileSplit(file=file))
 
-        logger.debug(
-            "RoundRobin splits: %d files → %d workers, epoch=%d, shuffle=%s",
+        file_counts = [len(s.file_splits) for s in splits]
+        logger.info(
+            "RoundRobinSplitStrategy: %d files → %d workers  epoch=%d  shuffle=%s  "
+            "files_per_worker=%s",
             len(files), num_workers, epoch, self.shuffle,
+            file_counts,
         )
+        for split in splits:
+            paths = [fs.file.path for fs in split.file_splits]
+            logger.debug(
+                "Split %d: %d file(s)  %s",
+                split.id, len(paths), paths,
+            )
         return splits
