@@ -46,7 +46,11 @@ class SizeBalancedSplitStrategy:
 
         # fall back to round-robin if no weight metadata available
         if all(w is None for w in weights):
-            logger.debug("SizeBalanced: no weight metadata, falling back to round-robin")
+            logger.info(
+                "SizeBalancedSplitStrategy: no weight metadata, falling back to round-robin  "
+                "files=%d workers=%d epoch=%d",
+                len(files), num_workers, epoch,
+            )
             splits = [Split(id=i) for i in range(num_workers)]
             for i, file in enumerate(file_list):
                 splits[i % num_workers].file_splits.append(FileSplit(file=file))
@@ -54,6 +58,7 @@ class SizeBalancedSplitStrategy:
 
         # replace missing weights with 0 for bin-packing
         weights = [w if w is not None else 0 for w in weights]
+        weight_metric = "record_count" if file_list and file_list[0].record_count is not None else "file_size"
 
         # greedy bin-packing — assign each file to the least-loaded split
         splits = [Split(id=i) for i in range(num_workers)]
@@ -64,8 +69,17 @@ class SizeBalancedSplitStrategy:
             splits[min_idx].file_splits.append(FileSplit(file=file))
             totals[min_idx] += weight
 
-        logger.debug(
-            "SizeBalanced splits: %d files → %d workers, epoch=%d, totals=%s",
-            len(files), num_workers, epoch, totals,
+        logger.info(
+            "SizeBalancedSplitStrategy: %d files → %d workers  epoch=%d  shuffle=%s  "
+            "metric=%s  split_totals=%s",
+            len(files), num_workers, epoch, self.shuffle,
+            weight_metric, totals,
         )
+        for split in splits:
+            split_weight = sum(_file_weight(fs.file) or 0 for fs in split.file_splits)
+            logger.debug(
+                "Split %d: %d file(s)  total_%s=%d  files=%s",
+                split.id, len(split.file_splits), weight_metric, split_weight,
+                [fs.file.path for fs in split.file_splits],
+            )
         return splits
