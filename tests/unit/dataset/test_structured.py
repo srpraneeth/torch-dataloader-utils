@@ -164,7 +164,7 @@ def test_shuffle_regenerates_splits(tmp_path):
     orders = []
     for epoch in range(5):
         ds.set_epoch(epoch)
-        orders.append([fs.file.path for fs in ds._splits[0].file_splits])
+        orders.append([sp.file.path for sp in ds._splits[0].splits])
 
     assert not all(o == orders[0] for o in orders), "All epochs produced identical order"
 
@@ -314,3 +314,66 @@ def test_create_dataloader_num_workers_none():
     assert isinstance(loader, DataLoader)
     expected = max(1, (os.cpu_count() or 1) - 1)
     assert loader.num_workers == expected
+
+
+# ---------------------------------------------------------------------------
+# set_epoch with shuffle=False still regenerates splits
+# ---------------------------------------------------------------------------
+
+def test_set_epoch_shuffle_false_regenerates_splits(tmp_path):
+    """set_epoch should regenerate splits even when shuffle=False."""
+    t = pa.table({"val": pa.array([1, 2], type=pa.int32())})
+    for i in range(2):
+        pq.write_table(t, tmp_path / f"f{i}.parquet")
+
+    files = _make_files(*[str(tmp_path / f"f{i}.parquet") for i in range(2)])
+    ds = StructuredDataset(files=files, format="parquet", num_workers=1, shuffle=False)
+
+    splits_before = ds._splits
+    ds.set_epoch(1)
+    # Object identity should change — splits were regenerated
+    assert ds._splits is not splits_before
+    assert ds._epoch == 1
+
+
+def test_set_epoch_shuffle_false_same_order_every_epoch(tmp_path):
+    """With shuffle=False, splits order is stable across epochs."""
+    t = pa.table({"val": pa.array([1, 2], type=pa.int32())})
+    for i in range(4):
+        pq.write_table(t, tmp_path / f"f{i}.parquet")
+
+    files = _make_files(*[str(tmp_path / f"f{i}.parquet") for i in range(4)])
+    ds = StructuredDataset(files=files, format="parquet", num_workers=1, shuffle=False)
+
+    orders = []
+    for epoch in range(3):
+        ds.set_epoch(epoch)
+        orders.append([sp.file.path for sp in ds._splits[0].splits])
+
+    assert all(o == orders[0] for o in orders)
+
+
+# ---------------------------------------------------------------------------
+# numpy / torch with explicit collate_fn — should not raise
+# ---------------------------------------------------------------------------
+
+def test_numpy_output_with_collate_fn_does_not_raise():
+    import numpy as np
+    files = _make_files(str(FIXTURES / "sample.parquet"))
+    ds = StructuredDataset(
+        files=files, format="parquet", num_workers=1,
+        output_format="numpy", collate_fn=lambda x: x,
+    )
+    batch = next(iter(ds))
+    assert isinstance(batch["feature_a"], np.ndarray)
+
+
+def test_torch_output_with_collate_fn_does_not_raise():
+    import torch
+    files = _make_files(str(FIXTURES / "sample.parquet"))
+    ds = StructuredDataset(
+        files=files, format="parquet", num_workers=1,
+        output_format="torch", collate_fn=lambda x: x,
+    )
+    batch = next(iter(ds))
+    assert isinstance(batch["feature_a"], torch.Tensor)

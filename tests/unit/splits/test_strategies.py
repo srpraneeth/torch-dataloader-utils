@@ -24,14 +24,14 @@ def make_iceberg_files(counts: list[int]) -> list[IcebergDataFileInfo]:
     ]
 
 
-def paths(splits) -> list[list[str]]:
-    """Extract file paths from splits for easy comparison."""
-    return [[fs.file.path for fs in s.file_splits] for s in splits]
+def paths(shards) -> list[list[str]]:
+    """Extract file paths from shards for easy comparison."""
+    return [[s.file.path for s in sh.splits] for sh in shards]
 
 
-def all_paths(splits) -> list[str]:
-    """Flatten all paths across all splits."""
-    return [fs.file.path for s in splits for fs in s.file_splits]
+def all_paths(shards) -> list[str]:
+    """Flatten all paths across all shards."""
+    return [s.file.path for sh in shards for s in sh.splits]
 
 
 # ============================================================
@@ -42,58 +42,57 @@ class TestRoundRobin:
 
     def test_even_distribution(self):
         strategy = RoundRobinSplitStrategy()
-        splits = strategy.generate(make_files(8), num_workers=4)
-        assert all(len(s.file_splits) == 2 for s in splits)
+        shards = strategy.generate(make_files(8), num_workers=4)
+        assert all(len(sh.splits) == 2 for sh in shards)
 
     def test_uneven_distribution(self):
         strategy = RoundRobinSplitStrategy()
-        splits = strategy.generate(make_files(9), num_workers=4)
-        sizes = [len(s.file_splits) for s in splits]
+        shards = strategy.generate(make_files(9), num_workers=4)
+        sizes = [len(sh.splits) for sh in shards]
         assert max(sizes) - min(sizes) <= 1
 
-    def test_no_file_in_two_splits(self):
+    def test_no_file_in_two_shards(self):
         files = make_files(9)
         strategy = RoundRobinSplitStrategy()
-        splits = strategy.generate(files, num_workers=4)
-        assert sorted(all_paths(splits)) == sorted(f.path for f in files)
+        shards = strategy.generate(files, num_workers=4)
+        assert sorted(all_paths(shards)) == sorted(f.path for f in files)
 
-    def test_correct_split_count(self):
+    def test_correct_shard_count(self):
         strategy = RoundRobinSplitStrategy()
-        splits = strategy.generate(make_files(9), num_workers=4)
-        assert len(splits) == 4
-        assert [s.id for s in splits] == [0, 1, 2, 3]
+        shards = strategy.generate(make_files(9), num_workers=4)
+        assert len(shards) == 4
+        assert [sh.id for sh in shards] == [0, 1, 2, 3]
 
     def test_single_worker(self):
         files = make_files(5)
         strategy = RoundRobinSplitStrategy()
-        splits = strategy.generate(files, num_workers=1)
-        assert len(splits) == 1
-        assert len(splits[0].file_splits) == 5
+        shards = strategy.generate(files, num_workers=1)
+        assert len(shards) == 1
+        assert len(shards[0].splits) == 5
 
     def test_empty_files(self):
         strategy = RoundRobinSplitStrategy()
-        splits = strategy.generate([], num_workers=4)
-        assert all(s.file_splits == [] for s in splits)
+        shards = strategy.generate([], num_workers=4)
+        assert all(sh.splits == [] for sh in shards)
 
     def test_row_range_is_none(self):
-        # V1 — all FileSplits must have row_range=None
         strategy = RoundRobinSplitStrategy()
-        splits = strategy.generate(make_files(4), num_workers=2)
-        for s in splits:
-            for fs in s.file_splits:
-                assert fs.row_range is None
+        shards = strategy.generate(make_files(4), num_workers=2)
+        for sh in shards:
+            for sp in sh.splits:
+                assert sp.row_range is None
 
     def test_ignores_file_size(self):
         files = make_sized_files([1000, 1, 1, 1, 1, 1, 1, 1])
         strategy = RoundRobinSplitStrategy()
-        splits = strategy.generate(files, num_workers=2)
-        assert all(len(s.file_splits) == 4 for s in splits)
+        shards = strategy.generate(files, num_workers=2)
+        assert all(len(sh.splits) == 4 for sh in shards)
 
     def test_no_shuffle_preserves_order(self):
         files = make_files(5)
         strategy = RoundRobinSplitStrategy(shuffle=False)
-        splits = strategy.generate(files, num_workers=1)
-        assert [fs.file.path for fs in splits[0].file_splits] == [f.path for f in files]
+        shards = strategy.generate(files, num_workers=1)
+        assert [sp.file.path for sp in shards[0].splits] == [f.path for f in files]
 
     def test_shuffle_reproducible_same_epoch(self):
         files = make_files(9)
@@ -125,15 +124,15 @@ class TestSizeBalanced:
     def test_balanced_by_record_count(self):
         files = make_counted_files([1000, 500, 300, 200])
         strategy = SizeBalancedSplitStrategy()
-        splits = strategy.generate(files, num_workers=2)
-        totals = [sum(fs.file.record_count for fs in s.file_splits) for s in splits]
+        shards = strategy.generate(files, num_workers=2)
+        totals = [sum(sp.file.record_count for sp in sh.splits) for sh in shards]
         assert totals[0] == totals[1]
 
     def test_balanced_by_file_size(self):
         files = make_sized_files([100, 50, 30, 20])
         strategy = SizeBalancedSplitStrategy()
-        splits = strategy.generate(files, num_workers=2)
-        totals = [sum(fs.file.file_size for fs in s.file_splits) for s in splits]
+        shards = strategy.generate(files, num_workers=2)
+        totals = [sum(sp.file.file_size for sp in sh.splits) for sh in shards]
         assert totals[0] == totals[1]
 
     def test_record_count_preferred_over_file_size(self):
@@ -144,36 +143,36 @@ class TestSizeBalanced:
             DataFileInfo(path="f3.parquet", record_count=200,  file_size=999),
         ]
         strategy = SizeBalancedSplitStrategy()
-        splits = strategy.generate(files, num_workers=2)
-        totals = [sum(fs.file.record_count for fs in s.file_splits) for s in splits]
+        shards = strategy.generate(files, num_workers=2)
+        totals = [sum(sp.file.record_count for sp in sh.splits) for sh in shards]
         assert totals[0] == totals[1]
 
     def test_fallback_to_roundrobin_no_metadata(self):
         files = make_files(8)
         strategy = SizeBalancedSplitStrategy()
-        splits = strategy.generate(files, num_workers=4)
-        assert all(len(s.file_splits) == 2 for s in splits)
+        shards = strategy.generate(files, num_workers=4)
+        assert all(len(sh.splits) == 2 for sh in shards)
 
-    def test_no_file_in_two_splits(self):
+    def test_no_file_in_two_shards(self):
         files = make_sized_files([100, 50, 30, 20])
         strategy = SizeBalancedSplitStrategy()
-        splits = strategy.generate(files, num_workers=2)
-        assert sorted(all_paths(splits)) == sorted(f.path for f in files)
+        shards = strategy.generate(files, num_workers=2)
+        assert sorted(all_paths(shards)) == sorted(f.path for f in files)
 
     def test_iceberg_files_use_record_count(self):
         files = make_iceberg_files([1000, 500, 300, 200])
         strategy = SizeBalancedSplitStrategy()
-        splits = strategy.generate(files, num_workers=2)
-        totals = [sum(fs.file.record_count for fs in s.file_splits) for s in splits]
+        shards = strategy.generate(files, num_workers=2)
+        totals = [sum(sp.file.record_count for sp in sh.splits) for sh in shards]
         assert totals[0] == totals[1]
 
     def test_row_range_is_none(self):
         files = make_sized_files([100, 50, 30, 20])
         strategy = SizeBalancedSplitStrategy()
-        splits = strategy.generate(files, num_workers=2)
-        for s in splits:
-            for fs in s.file_splits:
-                assert fs.row_range is None
+        shards = strategy.generate(files, num_workers=2)
+        for sh in shards:
+            for sp in sh.splits:
+                assert sp.row_range is None
 
     def test_shuffle_reproducible(self):
         files = make_sized_files([100, 50, 30, 20, 10])
@@ -194,12 +193,42 @@ class TestSizeBalanced:
 # ============================================================
 
 def test_custom_strategy_no_inheritance():
-    from torch_dataloader_utils.splits.core import FileSplit, Split
+    from torch_dataloader_utils.splits.core import Shard, Split
 
     class MyStrategy:
-        def generate(self, files, num_workers, epoch=0) -> list[Split]:
-            return [Split(id=i, file_splits=[FileSplit(file=f) for f in files])
+        def generate(self, files, num_workers, epoch=0) -> list[Shard]:
+            return [Shard(id=i, splits=[Split(file=f) for f in files])
                     for i in range(num_workers)]
 
-    splits = MyStrategy().generate(make_files(4), num_workers=2)
-    assert len(splits) == 2
+    shards = MyStrategy().generate(make_files(4), num_workers=2)
+    assert len(shards) == 2
+
+
+# ============================================================
+# SizeBalancedSplitStrategy: mixed metadata
+# ============================================================
+
+class TestSizeBalancedMixedMetadata:
+
+    def test_some_files_missing_weight_treated_as_zero(self):
+        """Files with no record_count or file_size are treated as weight 0."""
+        files = [
+            DataFileInfo(path="f0.parquet", record_count=1000),
+            DataFileInfo(path="f1.parquet", record_count=None, file_size=None),  # no weight
+            DataFileInfo(path="f2.parquet", record_count=500),
+        ]
+        strategy = SizeBalancedSplitStrategy()
+        shards = strategy.generate(files, num_workers=2)
+        all_file_paths = [sp.file.path for sh in shards for sp in sh.splits]
+        assert sorted(all_file_paths) == ["f0.parquet", "f1.parquet", "f2.parquet"]
+
+    def test_mixed_record_count_and_file_size_prefers_record_count(self):
+        """When first file has record_count, metric is record_count for all."""
+        files = [
+            DataFileInfo(path="f0.parquet", record_count=1000, file_size=1),
+            DataFileInfo(path="f1.parquet", record_count=1000, file_size=999),
+        ]
+        strategy = SizeBalancedSplitStrategy()
+        shards = strategy.generate(files, num_workers=2)
+        # Both files have equal record_count → one file per shard
+        assert all(len(sh.splits) == 1 for sh in shards)

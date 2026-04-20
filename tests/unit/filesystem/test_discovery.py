@@ -146,3 +146,65 @@ def test_returned_paths_are_strings(tmp_path):
     _write_files(tmp_path, ["a.parquet", "b.parquet"])
     result = discover_files(str(tmp_path))
     assert all(isinstance(f.path, str) for f in result)
+
+
+# ---------------------------------------------------------------------------
+# Scenario: _install_hint — correct package suggested per scheme
+# ---------------------------------------------------------------------------
+
+def test_install_hint_s3():
+    from torch_dataloader_utils.filesystem.discovery import _install_hint
+    assert "[s3]" in _install_hint("s3://bucket/data/")
+
+
+def test_install_hint_s3a():
+    from torch_dataloader_utils.filesystem.discovery import _install_hint
+    assert "[s3]" in _install_hint("s3a://bucket/data/")
+
+
+def test_install_hint_gs():
+    from torch_dataloader_utils.filesystem.discovery import _install_hint
+    assert "[gcs]" in _install_hint("gs://bucket/data/")
+
+
+def test_install_hint_gcs():
+    from torch_dataloader_utils.filesystem.discovery import _install_hint
+    assert "[gcs]" in _install_hint("gcs://bucket/data/")
+
+
+def test_install_hint_az():
+    from torch_dataloader_utils.filesystem.discovery import _install_hint
+    assert "[azure]" in _install_hint("az://container/data/")
+
+
+def test_install_hint_abfs():
+    from torch_dataloader_utils.filesystem.discovery import _install_hint
+    assert "[azure]" in _install_hint("abfs://container/data/")
+
+
+def test_install_hint_local_path():
+    from torch_dataloader_utils.filesystem.discovery import _install_hint
+    hint = _install_hint("/local/path/data/")
+    assert "pip install torch-dataloader-utils" in hint
+    assert "[" not in hint  # no extra specifier for unknown/local
+
+
+def test_install_hint_unknown_scheme():
+    from torch_dataloader_utils.filesystem.discovery import _install_hint
+    hint = _install_hint("hdfs://namenode/data/")
+    assert "pip install torch-dataloader-utils" in hint
+
+
+# ---------------------------------------------------------------------------
+# Scenario: glob pattern matches only directories → returns empty list
+# ---------------------------------------------------------------------------
+
+def test_glob_skips_directories(tmp_path):
+    """Glob that matches a directory (not a file) should not include it."""
+    sub = tmp_path / "subdir"
+    sub.mkdir()
+    _write_files(tmp_path, ["a.parquet"])
+    # Use a glob that matches both files and the subdir
+    result = discover_files(str(tmp_path / "*"))
+    # subdir should be excluded; only the parquet file included
+    assert all(Path(f.path).is_file() for f in result)

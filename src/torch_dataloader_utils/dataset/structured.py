@@ -9,9 +9,9 @@ from torch.utils.data import DataLoader, IterableDataset
 from torch_dataloader_utils.dataset.output import convert_batch
 from torch_dataloader_utils.filesystem.discovery import discover_files
 from torch_dataloader_utils.format.reader import SUPPORTED_FORMATS, read_split
-from torch_dataloader_utils.splits.balanced import SizeBalancedSplitStrategy
-from torch_dataloader_utils.splits.core import DataFileInfo, Split, SplitStrategy
+from torch_dataloader_utils.splits.core import DataFileInfo, Shard, SplitStrategy
 from torch_dataloader_utils.splits.round_robin import RoundRobinSplitStrategy
+from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +21,10 @@ _SUPPORTED_OUTPUT_FORMATS = {"torch", "numpy", "arrow", "dict"}
 def _auto_select_strategy(
     files: list[DataFileInfo], shuffle: bool, shuffle_seed: int
 ) -> SplitStrategy:
-    if files and all(f.record_count is not None for f in files):
-        logger.info("Auto-selected split strategy: SizeBalancedSplitStrategy (record_count)")
-        return SizeBalancedSplitStrategy(shuffle=shuffle, seed=shuffle_seed)
-    if files and all(f.file_size is not None for f in files):
-        logger.info("Auto-selected split strategy: SizeBalancedSplitStrategy (file_size)")
-        return SizeBalancedSplitStrategy(shuffle=shuffle, seed=shuffle_seed)
-    logger.info("Auto-selected split strategy: RoundRobinSplitStrategy")
+    if files:
+        logger.info("Auto-selected split strategy: TargetSizeSplitStrategy")
+        return TargetSizeSplitStrategy(shuffle=shuffle, seed=shuffle_seed)
+    logger.info("Auto-selected split strategy: RoundRobinSplitStrategy (no files)")
     return RoundRobinSplitStrategy(shuffle=shuffle, seed=shuffle_seed)
 
 
@@ -99,9 +96,9 @@ class StructuredDataset(IterableDataset):
         # Splits are generated in the main process and stored as immutable data.
         # Workers receive a pickled copy — __iter__ only reads, never writes.
         self._epoch: int = 0
-        self._splits: list[Split] = self._generate_splits()
+        self._splits: list[Shard] = self._generate_splits()
 
-    def _generate_splits(self) -> list[Split]:
+    def _generate_splits(self) -> list[Shard]:
         n = max(self._num_workers, 1)
         return self._strategy.generate(self._files, num_workers=n, epoch=self._epoch)
 
@@ -118,14 +115,11 @@ class StructuredDataset(IterableDataset):
         Has no effect when shuffle=False.
         """
         self._epoch = epoch
-        if self._shuffle:
-            self._splits = self._generate_splits()
-            logger.info(
-                "Regenerated splits for epoch %d  strategy=%s  num_workers=%d",
-                epoch, type(self._strategy).__name__, self._num_workers,
-            )
-        else:
-            logger.debug("set_epoch(%d) called with shuffle=False — no-op", epoch)
+        self._splits = self._generate_splits()
+        logger.info(
+            "Regenerated splits for epoch %d  strategy=%s  num_workers=%d",
+            epoch, type(self._strategy).__name__, self._num_workers,
+        )
 
     def __iter__(self) -> Iterator[Any]:
         from torch.utils.data import get_worker_info
@@ -140,17 +134,17 @@ class StructuredDataset(IterableDataset):
             )
             return
 
-        split = self._splits[worker_id]
-        file_paths = [fs.file.path for fs in split.file_splits]
+        shard = self._splits[worker_id]
+        file_paths = [s.file.path for s in shard.splits]
         logger.info(
-            "Worker %d: assigned split %d with %d file(s)",
-            worker_id, split.id, len(split.file_splits),
+            "Worker %d: assigned shard %d with %d split(s)",
+            worker_id, shard.id, len(shard.splits),
         )
         for path in file_paths:
-            logger.debug("Worker %d: split %d file → %s", worker_id, split.id, path)
+            logger.debug("Worker %d: shard %d file → %s", worker_id, shard.id, path)
 
         for batch in read_split(
-            split,
+            shard,
             format=self._format,
             batch_size=self._batch_size,
             columns=self._columns,

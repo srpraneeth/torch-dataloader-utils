@@ -267,3 +267,115 @@ def test_s3_no_rows_dropped_or_duplicated():
     row_ids = rows["row_id"]
     assert len(row_ids) == 300
     assert sorted(row_ids) == list(range(300))
+
+
+# ---------------------------------------------------------------------------
+# Scenario: S3 combined projection + predicate
+# ---------------------------------------------------------------------------
+
+@pytest.mark.integration
+def test_s3_projection_and_predicate():
+    """Projection and predicate applied together over S3 return correct columns and rows."""
+    with mock_aws():
+        client = boto3.client("s3", region_name=REGION)
+        client.create_bucket(Bucket=BUCKET)
+        for i in range(2):
+            _upload(client, f"data/f{i}.parquet", _make_table(100, row_id_offset=i * 100))
+
+        loader, _ = StructuredDataset.create_dataloader(
+            path=f"s3://{BUCKET}/data/",
+            format="parquet",
+            num_workers=0,
+            columns=["feature_a", "label"],
+            filters=pc.field("feature_b") >= 50,
+            storage_options=_storage_options(),
+        )
+        rows = _collect(loader)
+
+    assert set(rows.keys()) == {"feature_a", "label"}
+    assert len(rows["label"]) == 100  # 50 rows per file × 2 files
+    assert "feature_b" not in rows
+
+
+# ---------------------------------------------------------------------------
+# Scenario: S3 TargetSizeSplitStrategy sub-file splitting
+# ---------------------------------------------------------------------------
+
+@pytest.mark.integration
+def test_s3_target_size_sub_file_splitting():
+    """TargetSizeSplitStrategy reads row group metadata from S3 and sub-splits correctly."""
+    from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
+
+    with mock_aws():
+        client = boto3.client("s3", region_name=REGION)
+        client.create_bucket(Bucket=BUCKET)
+
+        # Write a multi-row-group Parquet file to S3
+        buf = io.BytesIO()
+        writer = pq.ParquetWriter(buf, _make_table(1).schema)
+        for i in range(4):
+            writer.write_table(_make_table(100, row_id_offset=i * 100))
+        writer.close()
+        client.put_object(Bucket=BUCKET, Key="data/large.parquet", Body=buf.getvalue())
+
+        strategy = TargetSizeSplitStrategy(target_bytes=1)
+        loader, _ = StructuredDataset.create_dataloader(
+            path=f"s3://{BUCKET}/data/large.parquet",
+            format="parquet",
+            num_workers=0,
+            batch_size=50,
+            split_strategy=strategy,
+            storage_options=_storage_options(),
+        )
+        rows = _collect(loader)
+
+    assert sorted(rows["row_id"]) == list(range(400))
+
+
+# ---------------------------------------------------------------------------
+# Scenario: S3 compound predicate AND
+# ---------------------------------------------------------------------------
+
+@pytest.mark.integration
+def test_s3_compound_predicate():
+    """Compound AND filter returns only rows satisfying both conditions over S3."""
+    with mock_aws():
+        client = boto3.client("s3", region_name=REGION)
+        client.create_bucket(Bucket=BUCKET)
+        _upload(client, "data/f1.parquet", _make_table(100))
+
+        loader, _ = StructuredDataset.create_dataloader(
+            path=f"s3://{BUCKET}/data/",
+            format="parquet",
+            num_workers=0,
+            filters=(pc.field("feature_b") >= 20) & (pc.field("feature_b") < 60),
+            storage_options=_storage_options(),
+        )
+        rows = _collect(loader)
+
+    assert all(20 <= v < 60 for v in rows["feature_b"])
+    assert len(rows["feature_b"]) == 40
+
+
+# ---------------------------------------------------------------------------
+# Scenario: S3 predicate eliminates all rows
+# ---------------------------------------------------------------------------
+
+@pytest.mark.integration
+def test_s3_predicate_no_rows():
+    """Filter that matches no rows over S3 yields empty result."""
+    with mock_aws():
+        client = boto3.client("s3", region_name=REGION)
+        client.create_bucket(Bucket=BUCKET)
+        _upload(client, "data/f1.parquet", _make_table(100))
+
+        loader, _ = StructuredDataset.create_dataloader(
+            path=f"s3://{BUCKET}/data/",
+            format="parquet",
+            num_workers=0,
+            filters=pc.field("feature_b") > 999,
+            storage_options=_storage_options(),
+        )
+        rows = _collect(loader)
+
+    assert rows == {} or all(len(v) == 0 for v in rows.values())

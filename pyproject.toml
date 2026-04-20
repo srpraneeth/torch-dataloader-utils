@@ -33,6 +33,8 @@ dev     = [
     "ruff>=0.4",
     "pre-commit>=3.7",
     "moto[s3]>=5.0",
+    "pyiceberg>=0.6",
+    "tqdm>=4.0",
 ]
 
 [project.urls]
@@ -60,7 +62,7 @@ ignore = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts   = "--cov=torch_dataloader_utils --cov-report=term-missing -m 'not integration'"
+addopts   = "--cov=torch_dataloader_utils --cov-report=term-missing"
 markers   = [
     "integration: marks tests as integration tests (deselected by default)",
 ]
@@ -72,4 +74,5 @@ omit   = ["tests/*"]
 [dependency-groups]
 dev = [
     "s3fs>=2026.3.0",
+    "sqlalchemy>=2.0.49",
 ]
