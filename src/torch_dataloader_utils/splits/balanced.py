@@ -1,7 +1,7 @@
 import logging
 import random
 
-from torch_dataloader_utils.splits.core import DataFileInfo, FileSplit, Split
+from torch_dataloader_utils.splits.core import DataFileInfo, Shard, Split
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ class SizeBalancedSplitStrategy:
 
     Uses record_count when available (Iceberg), falls back to file_size
     (plain files), falls back to round-robin when neither is available.
-    Uses a greedy bin-packing algorithm — assigns each file to the split
+    Uses a greedy bin-packing algorithm — assigns each file to the shard
     with the current lowest total weight.
     All files are read in full (row_range=None).
     Satisfies the SplitStrategy protocol.
@@ -35,7 +35,7 @@ class SizeBalancedSplitStrategy:
         files: list[DataFileInfo],
         num_workers: int,
         epoch: int = 0,
-    ) -> list[Split]:
+    ) -> list[Shard]:
         file_list = list(files)
 
         if self.shuffle:
@@ -51,35 +51,35 @@ class SizeBalancedSplitStrategy:
                 "files=%d workers=%d epoch=%d",
                 len(files), num_workers, epoch,
             )
-            splits = [Split(id=i) for i in range(num_workers)]
+            shards = [Shard(id=i) for i in range(num_workers)]
             for i, file in enumerate(file_list):
-                splits[i % num_workers].file_splits.append(FileSplit(file=file))
-            return splits
+                shards[i % num_workers].splits.append(Split(file=file))
+            return shards
 
         # replace missing weights with 0 for bin-packing
         weights = [w if w is not None else 0 for w in weights]
         weight_metric = "record_count" if file_list and file_list[0].record_count is not None else "file_size"
 
-        # greedy bin-packing — assign each file to the least-loaded split
-        splits = [Split(id=i) for i in range(num_workers)]
+        # greedy bin-packing — assign each file to the least-loaded shard
+        shards = [Shard(id=i) for i in range(num_workers)]
         totals = [0] * num_workers
 
         for file, weight in sorted(zip(file_list, weights), key=lambda x: x[1], reverse=True):
             min_idx = totals.index(min(totals))
-            splits[min_idx].file_splits.append(FileSplit(file=file))
+            shards[min_idx].splits.append(Split(file=file))
             totals[min_idx] += weight
 
         logger.info(
             "SizeBalancedSplitStrategy: %d files → %d workers  epoch=%d  shuffle=%s  "
-            "metric=%s  split_totals=%s",
+            "metric=%s  shard_totals=%s",
             len(files), num_workers, epoch, self.shuffle,
             weight_metric, totals,
         )
-        for split in splits:
-            split_weight = sum(_file_weight(fs.file) or 0 for fs in split.file_splits)
+        for shard in shards:
+            shard_weight = sum(_file_weight(s.file) or 0 for s in shard.splits)
             logger.debug(
-                "Split %d: %d file(s)  total_%s=%d  files=%s",
-                split.id, len(split.file_splits), weight_metric, split_weight,
-                [fs.file.path for fs in split.file_splits],
+                "Shard %d: %d split(s)  total_%s=%d  files=%s",
+                shard.id, len(shard.splits), weight_metric, shard_weight,
+                [s.file.path for s in shard.splits],
             )
-        return splits
+        return shards

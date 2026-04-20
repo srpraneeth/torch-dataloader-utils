@@ -1,24 +1,24 @@
 from torch_dataloader_utils.splits.core import (
     DataFileInfo,
-    FileSplit,
     IcebergDataFileInfo,
     RowRange,
+    Shard,
     Split,
 )
 
 
-def test_split_defaults():
-    s = Split(id=0)
-    assert s.file_splits == []
+def test_shard_defaults():
+    s = Shard(id=0)
+    assert s.splits == []
     assert s.row_count is None
     assert s.size_bytes is None
 
 
-def test_split_with_file_splits():
-    fs = [FileSplit(file=DataFileInfo(path="a.parquet"))]
-    s = Split(id=1, file_splits=fs)
+def test_shard_with_splits():
+    sp = [Split(file=DataFileInfo(path="a.parquet"))]
+    s = Shard(id=1, splits=sp)
     assert s.id == 1
-    assert len(s.file_splits) == 1
+    assert len(s.splits) == 1
 
 
 def test_datafileinfo_defaults():
@@ -34,18 +34,18 @@ def test_datafileinfo_with_metadata():
     assert f.record_count == 500
 
 
-def test_filesplit_defaults():
+def test_split_defaults():
     f = DataFileInfo(path="f1.parquet")
-    fs = FileSplit(file=f)
-    assert fs.file is f
-    assert fs.row_range is None   # V1 — full file read
+    sp = Split(file=f)
+    assert sp.file is f
+    assert sp.row_range is None   # full file read
 
 
-def test_filesplit_with_row_range():
+def test_split_with_row_range():
     f = DataFileInfo(path="f1.parquet", record_count=1_000_000)
-    fs = FileSplit(file=f, row_range=RowRange(offset=0, length=250_000))
-    assert fs.row_range.offset == 0
-    assert fs.row_range.length == 250_000
+    sp = Split(file=f, row_range=RowRange(offset=0, length=250_000))
+    assert sp.row_range.offset == 0
+    assert sp.row_range.length == 250_000
 
 
 def test_row_range():

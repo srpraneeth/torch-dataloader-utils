@@ -2,8 +2,8 @@ from torch_dataloader_utils.splits.core import (
     DataFileInfo,
     IcebergDataFileInfo,
     RowRange,
-    FileSplit,
     Split,
+    Shard,
     SplitStrategy,
 )
 from torch_dataloader_utils.splits.round_robin import RoundRobinSplitStrategy
@@ -13,8 +13,8 @@ __all__ = [
     "DataFileInfo",
     "IcebergDataFileInfo",
     "RowRange",
-    "FileSplit",
     "Split",
+    "Shard",
     "SplitStrategy",
     "RoundRobinSplitStrategy",
     "SizeBalancedSplitStrategy",

@@ -4,11 +4,12 @@ from typing import TYPE_CHECKING
 
 import fsspec
 import pyarrow as pa
-import pyarrow.dataset as pad
 import pyarrow.compute as pc
+import pyarrow.dataset as pad
 import pyarrow.fs as pafs
+import pyarrow.parquet as pq
 
-from torch_dataloader_utils.splits.core import Split
+from torch_dataloader_utils.splits.core import RowRange, Shard
 
 if TYPE_CHECKING:
     pass
@@ -22,17 +23,17 @@ _FORMAT_ALIASES = {"jsonl": "json"}
 
 
 def read_split(
-    split: Split,
+    shard: Shard,
     format: str,
     batch_size: int = 1024,
     columns: list[str] | None = None,
     filters: pc.Expression | None = None,
     storage_options: dict | None = None,
 ) -> Iterator[pa.RecordBatch]:
-    """Read a Split and yield pyarrow RecordBatches.
+    """Read a Shard and yield pyarrow RecordBatches.
 
     Args:
-        split: The Split to read — contains one or more FileSplits.
+        shard: The Shard to read — contains one or more Splits.
         format: File format — parquet, orc, csv, json, or jsonl.
         batch_size: Number of rows per RecordBatch.
         columns: Column projection — only these columns are read. None = all columns.
@@ -54,36 +55,96 @@ def read_split(
     arrow_format = _FORMAT_ALIASES.get(format, format)
     opts = storage_options or {}
 
-    n_files = len(split.file_splits)
+    n_splits = len(shard.splits)
     logger.info(
-        "Reading split %d: %d file(s)  format=%s  batch_size=%d  columns=%s  filters=%s",
-        split.id, n_files, format, batch_size,
+        "Reading shard %d: %d split(s)  format=%s  batch_size=%d  columns=%s  filters=%s",
+        shard.id, n_splits, format, batch_size,
         columns if columns else "all",
         "yes" if filters is not None else "none",
     )
 
     total_batches = 0
-    for file_split in split.file_splits:
-        path = file_split.file.path
-        logger.debug("Opening file: %s  size=%s bytes", path, file_split.file.file_size)
+    for split in shard.splits:
+        path = split.file.path
+        logger.debug("Opening file: %s  size=%s bytes", path, split.file.file_size)
 
         arrow_fs, resolved_path = _get_arrow_filesystem(path, opts)
 
-        ds = pad.dataset(resolved_path, format=arrow_format, filesystem=arrow_fs)
-        scanner = ds.scanner(columns=columns, filter=filters, batch_size=batch_size)
+        if split.row_range is not None and arrow_format == "parquet":
+            gen = _read_parquet_row_range(
+                resolved_path, split.row_range, columns, filters, batch_size, arrow_fs
+            )
+        else:
+            ds = pad.dataset(resolved_path, format=arrow_format, filesystem=arrow_fs)
+            scanner = ds.scanner(columns=columns, filter=filters, batch_size=batch_size)
+            gen = scanner.to_batches()
 
         file_batches = 0
-        for batch in scanner.to_batches():
+        last_batch = None
+        for batch in gen:
             file_batches += 1
             total_batches += 1
+            last_batch = batch
             yield batch
 
         logger.debug(
             "Finished file: %s  batches=%d  rows_last_batch=%d",
-            path, file_batches, batch.num_rows if file_batches > 0 else 0,
+            path, file_batches, last_batch.num_rows if last_batch is not None else 0,
         )
 
-    logger.info("Split %d complete: %d batch(es) yielded from %d file(s)", split.id, total_batches, n_files)
+    logger.info("Shard %d complete: %d batch(es) yielded from %d split(s)", shard.id, total_batches, n_splits)
+
+
+def _read_parquet_row_range(
+    path: str,
+    row_range: RowRange,
+    columns: list[str] | None,
+    filters: pc.Expression | None,
+    batch_size: int,
+    arrow_fs: pafs.FileSystem | None,
+) -> Iterator[pa.RecordBatch]:
+    """Read a RowRange from a Parquet file using row group random access.
+
+    Finds the row groups that cover [row_range.offset, row_range.offset + row_range.length),
+    reads only those row groups (true seek, no full scan), applies filters, and yields
+    RecordBatches of batch_size rows.
+    """
+    kwargs = {"filesystem": arrow_fs} if arrow_fs is not None else {}
+    pf = pq.ParquetFile(path, **kwargs)
+    meta = pf.metadata
+
+    target_start = row_range.offset
+    target_end = row_range.offset + row_range.length
+
+    # Find row group indices that overlap [target_start, target_end)
+    rg_indices = []
+    cumulative = 0
+    for i in range(meta.num_row_groups):
+        rg_start = cumulative
+        rg_end = cumulative + meta.row_group(i).num_rows
+        if rg_end > target_start and rg_start < target_end:
+            rg_indices.append(i)
+        cumulative = rg_end
+
+    if not rg_indices:
+        return
+
+    # Read without column projection first when a filter references columns not in `columns`.
+    # Apply filter on the full set of columns, then project down.
+    read_columns = None if (filters is not None and columns is not None) else columns
+    table = pf.read_row_groups(rg_indices, columns=read_columns)
+
+    if filters is not None:
+        table = table.filter(filters)
+
+    if filters is not None and columns is not None:
+        table = table.select(columns)
+
+    # Yield in batch_size chunks
+    offset = 0
+    while offset < len(table):
+        yield table.slice(offset, batch_size).to_batches()[0]
+        offset += batch_size
 
 
 def _get_arrow_filesystem(

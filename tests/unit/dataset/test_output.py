@@ -111,3 +111,42 @@ def test_unsupported_output_format_raises():
     batch = _batch()
     with pytest.raises(ValueError, match="xml"):
         convert_batch(batch, "xml")
+
+
+# ---------------------------------------------------------------------------
+# All numeric types produce tensors / ndarrays
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("arrow_type,torch_dtype", [
+    (pa.int8(),    "torch.int8"),
+    (pa.int16(),   "torch.int16"),
+    (pa.int32(),   "torch.int32"),
+    (pa.int64(),   "torch.int64"),
+    (pa.uint8(),   "torch.uint8"),
+    (pa.float16(), "torch.float16"),
+    (pa.float32(), "torch.float32"),
+    (pa.float64(), "torch.float64"),
+    (pa.bool_(),   "torch.bool"),
+])
+def test_torch_numeric_types(arrow_type, torch_dtype):
+    import torch
+    values = [True, False, True] if arrow_type == pa.bool_() else [1, 0, 1]
+    arr = pa.array(values, type=arrow_type)
+    batch = pa.record_batch({"col": arr})
+    result = convert_batch(batch, "torch")
+    assert isinstance(result["col"], torch.Tensor)
+    assert str(result["col"].dtype) == torch_dtype
+
+
+@pytest.mark.parametrize("arrow_type", [
+    pa.int8(), pa.int16(), pa.int32(), pa.int64(),
+    pa.uint8(), pa.uint16(), pa.uint32(), pa.uint64(),
+    pa.float16(), pa.float32(), pa.float64(),
+    pa.bool_(),
+])
+def test_numpy_numeric_types(arrow_type):
+    values = [True, False, True] if arrow_type == pa.bool_() else [1, 0, 1]
+    arr = pa.array(values, type=arrow_type)
+    batch = pa.record_batch({"col": arr})
+    result = convert_batch(batch, "numpy")
+    assert isinstance(result["col"], np.ndarray)
