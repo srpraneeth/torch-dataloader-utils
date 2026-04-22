@@ -339,8 +339,8 @@ def test_has_deletes_flag_set_when_delete_files_present(iceberg_catalog):
         "torch_dataloader_utils.dataset.iceberg", fromlist=["_resolve_files"]
     )._resolve_files
 
-    def patched_resolve(table_id, config, snap_id):
-        files, _, delete_paths = original_resolve(table_id, config, snap_id)
+    def patched_resolve(table_id, config, snap_id, scan_filter=None):
+        files, _, delete_paths = original_resolve(table_id, config, snap_id, scan_filter)
         # Force has_deletes=True to simulate a table with delete files
         return files, True, delete_paths
 
@@ -536,8 +536,8 @@ def test_iter_with_delete_flag_uses_slow_path(iceberg_catalog):
     # Force has_deletes=True so __iter__ takes the slow path
     from torch_dataloader_utils.dataset.iceberg import _resolve_files as _real_resolve
 
-    def _patched_resolve(table_id, config, snap_id):
-        files, _, delete_paths = _real_resolve(table_id, config, snap_id)
+    def _patched_resolve(table_id, config, snap_id, scan_filter=None):
+        files, _, delete_paths = _real_resolve(table_id, config, snap_id, scan_filter)
         return files, True, delete_paths
 
     test_batch = pa.record_batch({"row_id": pa.array(list(range(10)), pa.int32())})

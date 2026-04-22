@@ -898,3 +898,98 @@ def test_target_size_orc_whole_file_no_sub_split(tmp_path):
     rows = _collect(loader)
     assert sorted(rows["row_id"]) == list(range(300))
 
+
+# ---------------------------------------------------------------------------
+# Scenario: Hive partitioning end-to-end
+# ---------------------------------------------------------------------------
+
+@pytest.mark.integration
+def test_hive_partitioning_scanner_path(tmp_path):
+    """partitioning="hive" via scanner path adds partition columns to each batch."""
+    partitioned_dir = tmp_path / "region=us" / "year=2024"
+    partitioned_dir.mkdir(parents=True)
+    pq.write_table(_make_table(100), partitioned_dir / "part.parquet")
+
+    loader, _ = StructuredDataset.create_dataloader(
+        path=str(partitioned_dir / "part.parquet"),
+        format="parquet",
+        num_workers=0,
+        partitioning="hive",
+    )
+    rows = _collect(loader)
+    assert len(rows["row_id"]) == 100
+    assert "region" in rows
+    assert "year" in rows
+    assert all(r == "us" for r in rows["region"])
+    assert all(y == "2024" for y in rows["year"])
+
+
+@pytest.mark.integration
+def test_hive_partitioning_row_range_path(tmp_path):
+    """partitioning="hive" via row-range path parses path and attaches columns."""
+    from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
+
+    partitioned_dir = tmp_path / "region=eu" / "year=2023"
+    partitioned_dir.mkdir(parents=True)
+    path = partitioned_dir / "part.parquet"
+
+    # Write multi-row-group Parquet so TargetSizeSplitStrategy produces RowRange splits
+    writer = pq.ParquetWriter(str(path), _make_table(1).schema)
+    for i in range(4):
+        writer.write_table(_make_table(100, row_id_offset=i * 100))
+    writer.close()
+
+    strategy = TargetSizeSplitStrategy(target_bytes=1)  # one chunk per row group
+    loader, _ = StructuredDataset.create_dataloader(
+        path=str(path),
+        format="parquet",
+        num_workers=0,
+        split_strategy=strategy,
+        partitioning="hive",
+    )
+    rows = _collect(loader)
+    assert sorted(rows["row_id"]) == list(range(400))
+    assert "region" in rows
+    assert "year" in rows
+    assert all(r == "eu" for r in rows["region"])
+    assert all(y == "2023" for y in rows["year"])
+
+
+@pytest.mark.integration
+def test_hive_partitioning_no_extra_columns_without_flag(tmp_path):
+    """Without partitioning="hive", partition columns must NOT appear in output."""
+    partitioned_dir = tmp_path / "region=us"
+    partitioned_dir.mkdir(parents=True)
+    pq.write_table(_make_table(50), partitioned_dir / "part.parquet")
+
+    loader, _ = StructuredDataset.create_dataloader(
+        path=str(partitioned_dir / "part.parquet"),
+        format="parquet",
+        num_workers=0,
+    )
+    batch = next(iter(loader))
+    assert "region" not in batch
+
+
+@pytest.mark.integration
+def test_hive_partitioning_create_dataloader_api(tmp_path):
+    """partitioning="hive" is accepted by create_dataloader() and threaded through correctly."""
+    partitioned_dir = tmp_path / "split=train"
+    partitioned_dir.mkdir(parents=True)
+    pq.write_table(_make_table(30), partitioned_dir / "data.parquet")
+
+    loader, _ = StructuredDataset.create_dataloader(
+        path=str(partitioned_dir / "data.parquet"),
+        format="parquet",
+        num_workers=0,
+        batch_size=10,
+        partitioning="hive",
+    )
+    all_splits = []
+    for batch in loader:
+        if "split" in batch:
+            all_splits.extend(batch["split"])
+    assert all(s == "train" for s in all_splits)
+    assert len(all_splits) == 30
+
+

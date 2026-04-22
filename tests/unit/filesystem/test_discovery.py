@@ -208,3 +208,77 @@ def test_glob_skips_directories(tmp_path):
     result = discover_files(str(tmp_path / "*"))
     # subdir should be excluded; only the parquet file included
     assert all(Path(f.path).is_file() for f in result)
+
+
+# ---------------------------------------------------------------------------
+# Scenario: fsspec error surfacing
+# ---------------------------------------------------------------------------
+
+def _mock_fs_with_exists(exc_on_ls=None, exists_returns=True, is_dir=True):
+    """Build a mock fsspec filesystem that raises on ls/stat."""
+    fs = MagicMock()
+    fs.protocol = "s3"
+    fs.exists.return_value = exists_returns
+    fs.isdir.return_value = is_dir
+    if exc_on_ls:
+        fs.ls.side_effect = exc_on_ls
+        fs.stat.side_effect = exc_on_ls
+        fs.glob.side_effect = exc_on_ls
+    return fs
+
+
+def test_credential_error_raises_permission_error():
+    fs = _mock_fs_with_exists(exc_on_ls=Exception("No credentials found — AWS env vars not set"))
+    with patch("fsspec.url_to_fs", return_value=(fs, "bucket/data")):
+        with pytest.raises(PermissionError, match="No credentials found"):
+            discover_files("s3://bucket/data/")
+
+
+def test_access_denied_403_raises_permission_error():
+    fs = _mock_fs_with_exists(exc_on_ls=Exception("403 Forbidden — access denied"))
+    with patch("fsspec.url_to_fs", return_value=(fs, "bucket/data")):
+        with pytest.raises(PermissionError, match="Access denied"):
+            discover_files("s3://bucket/data/")
+
+
+def test_permission_denied_raises_permission_error():
+    fs = _mock_fs_with_exists(exc_on_ls=Exception("Permission denied to read bucket"))
+    with patch("fsspec.url_to_fs", return_value=(fs, "bucket/data")):
+        with pytest.raises(PermissionError, match="Access denied"):
+            discover_files("s3://bucket/data/")
+
+
+def test_404_not_found_raises_file_not_found():
+    fs = _mock_fs_with_exists(exc_on_ls=Exception("404 NoSuchBucket"))
+    with patch("fsspec.url_to_fs", return_value=(fs, "bucket/data")):
+        with pytest.raises(FileNotFoundError, match="Path not found"):
+            discover_files("s3://bucket/data/")
+
+
+def test_timeout_raises_timeout_error():
+    fs = _mock_fs_with_exists(exc_on_ls=Exception("Connection timed out after 30s"))
+    with patch("fsspec.url_to_fs", return_value=(fs, "bucket/data")):
+        with pytest.raises(TimeoutError, match="timed out"):
+            discover_files("s3://bucket/data/")
+
+
+def test_ssl_error_raises_os_error():
+    fs = _mock_fs_with_exists(exc_on_ls=Exception("SSL handshake failed"))
+    with patch("fsspec.url_to_fs", return_value=(fs, "bucket/data")):
+        with pytest.raises(OSError, match="SSL error"):
+            discover_files("s3://bucket/data/")
+
+
+def test_unknown_error_re_raised_unchanged():
+    fs = _mock_fs_with_exists(exc_on_ls=RuntimeError("Something weird happened"))
+    with patch("fsspec.url_to_fs", return_value=(fs, "bucket/data")):
+        with pytest.raises(RuntimeError, match="Something weird happened"):
+            discover_files("s3://bucket/data/")
+
+
+def test_file_not_found_passthrough_not_double_wrapped(tmp_path):
+    """FileNotFoundError from our own raise must not be caught and re-wrapped."""
+    missing = str(tmp_path / "does_not_exist")
+    with pytest.raises(FileNotFoundError, match="does_not_exist"):
+        discover_files(missing)
+

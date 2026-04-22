@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, IterableDataset
 from torch_dataloader_utils.dataset.output import convert_batch
 from torch_dataloader_utils.splits.core import IcebergDataFileInfo, Shard, SplitStrategy
 from torch_dataloader_utils.splits.round_robin import RoundRobinSplitStrategy
-from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
+from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy, parse_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,95 @@ def _require_pyiceberg():
             "pyiceberg is required for IcebergDataset.\n\n"
             "Install the required backend: pip install torch-dataloader-utils[iceberg]"
         )
+
+
+def _try_to_iceberg(expr: pc.Expression) -> Any:
+    """Best-effort translation of a pyarrow pc.Expression to a pyiceberg BooleanExpression.
+
+    Parses the stable string representation produced by pyarrow:
+      "(field >= value)"  "(field == 'str')"  "((e1) and (e2))"  "((e1) or (e2))"
+
+    Returns None if translation is not possible — caller falls back to row-level only.
+    """
+    try:
+        from pyiceberg.expressions import (
+            EqualTo, NotEqualTo,
+            GreaterThan, GreaterThanOrEqual,
+            LessThan, LessThanOrEqual,
+        )
+    except ImportError:
+        return None
+
+    return _parse_iceberg(str(expr), {
+        ">=": GreaterThanOrEqual, ">": GreaterThan,
+        "<=": LessThanOrEqual,   "<": LessThan,
+        "==": EqualTo,           "!=": NotEqualTo,
+    })
+
+
+def _parse_iceberg(s: str, ops: dict) -> Any:
+    """Recursive parser for pyarrow expression strings."""
+    s = s.strip()
+    if not (s.startswith("(") and s.endswith(")")):
+        return None
+    inner = s[1:-1].strip()
+
+    # AND / OR: split on top-level " and " / " or "
+    for keyword, cls in ((" and ", None), (" or ", None)):
+        parts = _split_top_level(inner, keyword)
+        if parts is not None:
+            from pyiceberg.expressions import And, Or
+            cls = And if keyword.strip() == "and" else Or
+            children = [_parse_iceberg(p, ops) for p in parts]
+            if all(c is not None for c in children):
+                result = children[0]
+                for c in children[1:]:
+                    result = cls(result, c)
+                return result
+
+    # Simple comparison: "field OP value"  (longest ops first to avoid ">=" matching ">")
+    import re
+    for op in sorted(ops, key=len, reverse=True):
+        # field name can contain word chars and dots
+        m = re.fullmatch(rf'(\w[\w.]*)\s*{re.escape(op)}\s*(.+)', inner)
+        if m:
+            field, raw_val = m.group(1), m.group(2).strip()
+            try:
+                # numeric
+                value: Any = int(raw_val) if re.fullmatch(r"-?\d+", raw_val) else float(raw_val)
+            except ValueError:
+                # string literal  "us"  or  'us'
+                if (raw_val.startswith('"') and raw_val.endswith('"')) or \
+                   (raw_val.startswith("'") and raw_val.endswith("'")):
+                    value = raw_val[1:-1]
+                else:
+                    return None
+            return ops[op](field, value)
+
+    return None
+
+
+def _split_top_level(s: str, sep: str) -> list[str] | None:
+    """Split `s` on `sep` only at depth 0 (not inside parentheses).
+    Returns list of parts or None if `sep` not found at top level.
+    """
+    depth, i, start, parts = 0, 0, 0, []
+    while i <= len(s) - len(sep):
+        if s[i] == "(":
+            depth += 1
+        elif s[i] == ")":
+            depth -= 1
+        elif depth == 0 and s[i:i + len(sep)] == sep:
+            parts.append(s[start:i])
+            start = i + len(sep)
+            i += len(sep)
+            continue
+        i += 1
+    if not parts:
+        return None
+    parts.append(s[start:])
+    return parts
+
 
 
 def _detect_format(files: list[IcebergDataFileInfo]) -> str:
@@ -43,10 +132,17 @@ def _detect_format(files: list[IcebergDataFileInfo]) -> str:
 
 
 def _auto_select_strategy(
-    files: list[IcebergDataFileInfo], shuffle: bool, shuffle_seed: int
+    files: list[IcebergDataFileInfo], shuffle: bool, shuffle_seed: int,
+    split_bytes: int | str | None = None,
+    split_rows: int | None = None,
 ) -> SplitStrategy:
     if files:
-        return TargetSizeSplitStrategy(shuffle=shuffle, seed=shuffle_seed)
+        kwargs: dict = {"shuffle": shuffle, "seed": shuffle_seed}
+        if split_bytes is not None:
+            kwargs["target_bytes"] = parse_bytes(split_bytes)
+        if split_rows is not None:
+            kwargs["target_rows"] = split_rows
+        return TargetSizeSplitStrategy(**kwargs)
     return RoundRobinSplitStrategy(shuffle=shuffle, seed=shuffle_seed)
 
 
@@ -54,6 +150,7 @@ def _resolve_files(
     table_identifier: str,
     catalog_config: dict,
     snapshot_id: int | None,
+    scan_filter: Any | None = None,
 ) -> tuple[list[IcebergDataFileInfo], bool, dict[str, set]]:
     """Connect to catalog, load table, scan, return file metadata.
 
@@ -66,8 +163,9 @@ def _resolve_files(
 
     catalog_type = catalog_config.get("type", "unknown")
     logger.info(
-        "Connecting to Iceberg catalog: type=%s  table=%s  snapshot_id=%s",
+        "Connecting to Iceberg catalog: type=%s  table=%s  snapshot_id=%s  scan_filter=%s",
         catalog_type, table_identifier, snapshot_id,
+        repr(scan_filter) if scan_filter is not None else "none",
     )
 
     catalog = load_catalog(**catalog_config)
@@ -78,10 +176,18 @@ def _resolve_files(
     else:
         table = catalog.load_table(table_identifier)
 
+    # Log the resolved schema
+    schema = table.schema()
+    field_summary = ", ".join(f"{f.name}: {f.field_type}" for f in schema.fields)
+    logger.info("Resolved schema for %s: [%s]", table_identifier, field_summary)
+
     # Fix #4: call current_snapshot() once, not once per file
     current_snap_id = table.current_snapshot().snapshot_id if snapshot_id is None else snapshot_id
 
-    scan = table.scan(snapshot_id=snapshot_id)
+    scan_kwargs: dict = {"snapshot_id": snapshot_id}
+    if scan_filter is not None:
+        scan_kwargs["row_filter"] = scan_filter
+    scan = table.scan(**scan_kwargs)
     scan_tasks = list(scan.plan_files())
 
     files: list[IcebergDataFileInfo] = []
@@ -121,6 +227,12 @@ def _resolve_files(
         "total_records=%d  has_delete_files=%s",
         table_identifier, len(files), total_size, total_records, has_deletes,
     )
+    file_summary = "  ".join(
+        f"[{i}] {f.file_size:,}B / {f.record_count:,} rows"
+        for i, f in enumerate(files)
+        if f.file_size is not None and f.record_count is not None
+    )
+    logger.info("File breakdown: %s", file_summary)
     return files, has_deletes, delete_paths
 
 
@@ -261,9 +373,12 @@ class IcebergDataset(IterableDataset):
         batch_size: int = 1024,
         columns: list[str] | None = None,
         filters: pc.Expression | None = None,
+        scan_filter: Any | None = None,
         snapshot_id: int | None = None,
         shuffle: bool = False,
         shuffle_seed: int = 42,
+        split_bytes: int | str | None = None,
+        split_rows: int | None = None,
         split_strategy: SplitStrategy | None = None,
         num_workers: int = 1,
         output_format: str = "torch",
@@ -271,7 +386,6 @@ class IcebergDataset(IterableDataset):
     ) -> None:
         _require_pyiceberg()
 
-        # Fix #6: validate output_format + collate_fn early
         if output_format not in _SUPPORTED_OUTPUT_FORMATS:
             supported = ", ".join(sorted(_SUPPORTED_OUTPUT_FORMATS))
             raise ValueError(
@@ -289,6 +403,21 @@ class IcebergDataset(IterableDataset):
         self._batch_size = batch_size
         self._columns = columns
         self._filters = filters
+
+        # Auto-derive scan_filter from filters when not explicitly provided
+        if scan_filter is None and filters is not None:
+            scan_filter = _try_to_iceberg(filters)
+            if scan_filter is not None:
+                logger.info(
+                    "Auto-derived scan_filter:  pc.Expression %s  →  pyiceberg %s",
+                    str(filters), repr(scan_filter),
+                )
+            else:
+                logger.debug(
+                    "Could not translate pc.Expression %s to iceberg expression — row-level filter only",
+                    str(filters),
+                )
+        self._scan_filter = scan_filter
         self._snapshot_id = snapshot_id
         self._shuffle = shuffle
         self._shuffle_seed = shuffle_seed
@@ -296,8 +425,7 @@ class IcebergDataset(IterableDataset):
         self._output_format = output_format
         self._collate_fn = collate_fn
 
-        # Fix #1: _resolve_files returns only picklable plain data — no live objects
-        files, has_deletes, delete_paths = _resolve_files(table, catalog_config, snapshot_id)
+        files, has_deletes, delete_paths = _resolve_files(table, catalog_config, snapshot_id, scan_filter)
         if not files:
             raise FileNotFoundError(
                 f"No data files found in Iceberg table {table!r} "
@@ -323,7 +451,7 @@ class IcebergDataset(IterableDataset):
         self._strategy = (
             split_strategy
             if split_strategy is not None
-            else _auto_select_strategy(files, shuffle, shuffle_seed)
+            else _auto_select_strategy(files, shuffle, shuffle_seed, split_bytes, split_rows)
         )
         self._epoch: int = 0
         self._splits: list[Shard] = self._generate_splits()
@@ -397,9 +525,12 @@ class IcebergDataset(IterableDataset):
         batch_size: int = 1024,
         columns: list[str] | None = None,
         filters: pc.Expression | None = None,
+        scan_filter: Any | None = None,
         snapshot_id: int | None = None,
         shuffle: bool = False,
         shuffle_seed: int = 42,
+        split_bytes: int | str | None = None,
+        split_rows: int | None = None,
         split_strategy: SplitStrategy | None = None,
         num_workers: int | None = None,
         output_format: str = "torch",
@@ -428,9 +559,12 @@ class IcebergDataset(IterableDataset):
             batch_size=batch_size,
             columns=columns,
             filters=filters,
+            scan_filter=scan_filter,
             snapshot_id=snapshot_id,
             shuffle=shuffle,
             shuffle_seed=shuffle_seed,
+            split_bytes=split_bytes,
+            split_rows=split_rows,
             split_strategy=split_strategy,
             num_workers=num_workers,
             output_format=output_format,

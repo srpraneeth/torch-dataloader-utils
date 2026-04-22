@@ -11,7 +11,7 @@ from torch_dataloader_utils.filesystem.discovery import discover_files
 from torch_dataloader_utils.format.reader import SUPPORTED_FORMATS, read_split
 from torch_dataloader_utils.splits.core import DataFileInfo, Shard, SplitStrategy
 from torch_dataloader_utils.splits.round_robin import RoundRobinSplitStrategy
-from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
+from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy, parse_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +19,18 @@ _SUPPORTED_OUTPUT_FORMATS = {"torch", "numpy", "arrow", "dict"}
 
 
 def _auto_select_strategy(
-    files: list[DataFileInfo], shuffle: bool, shuffle_seed: int
+    files: list[DataFileInfo], shuffle: bool, shuffle_seed: int,
+    split_bytes: int | str | None = None,
+    split_rows: int | None = None,
 ) -> SplitStrategy:
     if files:
+        kwargs: dict = {"shuffle": shuffle, "seed": shuffle_seed}
+        if split_bytes is not None:
+            kwargs["target_bytes"] = parse_bytes(split_bytes)
+        if split_rows is not None:
+            kwargs["target_rows"] = split_rows
         logger.info("Auto-selected split strategy: TargetSizeSplitStrategy")
-        return TargetSizeSplitStrategy(shuffle=shuffle, seed=shuffle_seed)
+        return TargetSizeSplitStrategy(**kwargs)
     logger.info("Auto-selected split strategy: RoundRobinSplitStrategy (no files)")
     return RoundRobinSplitStrategy(shuffle=shuffle, seed=shuffle_seed)
 
@@ -53,11 +60,14 @@ class StructuredDataset(IterableDataset):
         filters: pc.Expression | None = None,
         shuffle: bool = False,
         shuffle_seed: int = 42,
+        split_bytes: int | str | None = None,
+        split_rows: int | None = None,
         split_strategy: SplitStrategy | None = None,
         num_workers: int = 1,
         output_format: str = "torch",
         storage_options: dict | None = None,
         collate_fn: Callable | None = None,
+        partitioning: str | None = None,
     ) -> None:
         if format not in SUPPORTED_FORMATS:
             supported = ", ".join(sorted(SUPPORTED_FORMATS))
@@ -67,6 +77,11 @@ class StructuredDataset(IterableDataset):
             supported = ", ".join(sorted(_SUPPORTED_OUTPUT_FORMATS))
             raise ValueError(
                 f"Unsupported output_format {output_format!r}. Supported: {supported}"
+            )
+
+        if filters is not None and not isinstance(filters, pc.Expression):
+            raise TypeError(
+                f"filters must be a pyarrow pc.Expression, got {type(filters).__name__}."
             )
 
         if output_format in ("arrow", "dict") and collate_fn is None:
@@ -86,12 +101,13 @@ class StructuredDataset(IterableDataset):
         self._strategy = (
             split_strategy
             if split_strategy is not None
-            else _auto_select_strategy(files, shuffle, shuffle_seed)
+            else _auto_select_strategy(files, shuffle, shuffle_seed, split_bytes, split_rows)
         )
         self._num_workers = num_workers
         self._output_format = output_format
         self._storage_options = storage_options
         self._collate_fn = collate_fn
+        self._partitioning = partitioning
 
         # Splits are generated in the main process and stored as immutable data.
         # Workers receive a pickled copy — __iter__ only reads, never writes.
@@ -150,6 +166,7 @@ class StructuredDataset(IterableDataset):
             columns=self._columns,
             filters=self._filters,
             storage_options=self._storage_options,
+            partitioning=self._partitioning,
         ):
             yield convert_batch(batch, self._output_format)
 
@@ -163,11 +180,14 @@ class StructuredDataset(IterableDataset):
         filters: pc.Expression | None = None,
         shuffle: bool = False,
         shuffle_seed: int = 42,
+        split_bytes: int | str | None = None,
+        split_rows: int | None = None,
         split_strategy: SplitStrategy | None = None,
         num_workers: int | None = None,
         output_format: str = "torch",
         storage_options: dict | None = None,
         collate_fn: Callable | None = None,
+        partitioning: str | None = None,
     ) -> tuple[DataLoader, "StructuredDataset"]:
         """Create a DataLoader for structured files at the given path.
 
@@ -190,6 +210,19 @@ class StructuredDataset(IterableDataset):
         files = discover_files(path, storage_options=storage_options)
         logger.info("Discovered %d file(s) at %s", len(files), path)
 
+        if files:
+            try:
+                if format == "parquet":
+                    import pyarrow.parquet as pq
+                    schema = pq.read_schema(files[0].path)
+                else:
+                    import pyarrow.dataset as pads
+                    schema = pads.dataset(files[0].path, format=format).schema
+                field_summary = ", ".join(f"{f.name}: {f.type}" for f in schema)
+                logger.info("Inferred schema from %s: [%s]", files[0].path, field_summary)
+            except Exception:
+                pass  # schema logging is best-effort
+
         dataset = cls(
             files=files,
             format=format,
@@ -198,11 +231,14 @@ class StructuredDataset(IterableDataset):
             filters=filters,
             shuffle=shuffle,
             shuffle_seed=shuffle_seed,
+            split_bytes=split_bytes,
+            split_rows=split_rows,
             split_strategy=split_strategy,
             num_workers=num_workers,
             output_format=output_format,
             storage_options=storage_options,
             collate_fn=collate_fn,
+            partitioning=partitioning,
         )
 
         # For non-torch output formats, PyTorch's default collate would convert

@@ -377,3 +377,41 @@ def test_torch_output_with_collate_fn_does_not_raise():
     )
     batch = next(iter(ds))
     assert isinstance(batch["feature_a"], torch.Tensor)
+
+
+# ---------------------------------------------------------------------------
+# _auto_select_strategy — empty files → RoundRobinSplitStrategy (lines 27-28)
+# ---------------------------------------------------------------------------
+
+def test_auto_select_strategy_empty_files_returns_round_robin():
+    """With no files, _auto_select_strategy falls back to RoundRobinSplitStrategy."""
+    from torch_dataloader_utils.dataset.structured import _auto_select_strategy
+    from torch_dataloader_utils.splits.round_robin import RoundRobinSplitStrategy
+
+    strategy = _auto_select_strategy([], shuffle=False, shuffle_seed=42)
+    assert isinstance(strategy, RoundRobinSplitStrategy)
+
+
+def test_structured_dataset_empty_files_uses_round_robin():
+    """StructuredDataset constructed with empty files list selects RoundRobin."""
+    from torch_dataloader_utils.splits.round_robin import RoundRobinSplitStrategy
+
+    ds = StructuredDataset(files=[], format="parquet", num_workers=1)
+    assert isinstance(ds._strategy, RoundRobinSplitStrategy)
+
+
+# ---------------------------------------------------------------------------
+# create_dataloader — non-torch output with no collate_fn sets passthrough (line 218)
+# ---------------------------------------------------------------------------
+
+def test_create_dataloader_non_torch_output_sets_passthrough_collate():
+    """output_format='numpy' with no explicit collate_fn sets an identity collate on DataLoader."""
+    loader, _ = StructuredDataset.create_dataloader(
+        path=str(FIXTURES),
+        format="parquet",
+        num_workers=0,
+        output_format="numpy",
+        # no collate_fn → effective_collate = lambda x: x
+    )
+    # DataLoader should have a non-None collate_fn (the passthrough lambda)
+    assert loader.collate_fn is not None

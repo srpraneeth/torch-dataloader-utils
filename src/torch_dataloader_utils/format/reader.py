@@ -22,6 +22,21 @@ SUPPORTED_FORMATS = {"parquet", "orc", "csv", "json", "jsonl"}
 _FORMAT_ALIASES = {"jsonl": "json"}
 
 
+def _parse_hive_partitions(path: str) -> dict[str, str]:
+    """Extract key=value Hive partition segments from a file path.
+
+    Example: "/data/region=us/year=2024/part.parquet" → {"region": "us", "year": "2024"}
+    Values are always strings — callers cast as needed.
+    """
+    parts: dict[str, str] = {}
+    for segment in path.replace("\\", "/").split("/"):
+        if "=" in segment:
+            key, _, value = segment.partition("=")
+            if key and value:
+                parts[key] = value
+    return parts
+
+
 def read_split(
     shard: Shard,
     format: str,
@@ -29,6 +44,7 @@ def read_split(
     columns: list[str] | None = None,
     filters: pc.Expression | None = None,
     storage_options: dict | None = None,
+    partitioning: str | None = None,
 ) -> Iterator[pa.RecordBatch]:
     """Read a Shard and yield pyarrow RecordBatches.
 
@@ -39,6 +55,8 @@ def read_split(
         columns: Column projection — only these columns are read. None = all columns.
         filters: Predicate pushdown expression via pyarrow.compute. None = no filter.
         storage_options: Passed to fsspec for filesystem construction.
+        partitioning: Partition scheme — "hive" decodes key=value directory segments
+            and adds them as columns. None = no partitioning (default).
 
     Yields:
         pyarrow.RecordBatch
@@ -57,11 +75,17 @@ def read_split(
 
     n_splits = len(shard.splits)
     logger.info(
-        "Reading shard %d: %d split(s)  format=%s  batch_size=%d  columns=%s  filters=%s",
+        "Reading shard %d: %d split(s)  format=%s  batch_size=%d  columns=%s  filters=%s  partitioning=%s",
         shard.id, n_splits, format, batch_size,
         columns if columns else "all",
         "yes" if filters is not None else "none",
+        partitioning or "none",
     )
+    for i, sp in enumerate(shard.splits):
+        fname = sp.file.path.rsplit("/", 1)[-1]
+        rows = sp.row_range.length if sp.row_range is not None else (sp.file.record_count or sp.file.file_size or "?")
+        row_range = f"rows=[{sp.row_range.offset},{sp.row_range.offset + sp.row_range.length})" if sp.row_range is not None else "full"
+        logger.info("  [%d] %s  %s  total=%s", i, fname, row_range, rows)
 
     total_batches = 0
     for split in shard.splits:
@@ -72,10 +96,16 @@ def read_split(
 
         if split.row_range is not None and arrow_format == "parquet":
             gen = _read_parquet_row_range(
-                resolved_path, split.row_range, columns, filters, batch_size, arrow_fs
+                path, resolved_path, split.row_range, columns, filters, batch_size,
+                arrow_fs, partitioning,
             )
         else:
-            ds = pad.dataset(resolved_path, format=arrow_format, filesystem=arrow_fs)
+            ds = pad.dataset(
+                resolved_path,
+                format=arrow_format,
+                filesystem=arrow_fs,
+                partitioning=partitioning,
+            )
             scanner = ds.scanner(columns=columns, filter=filters, batch_size=batch_size)
             gen = scanner.to_batches()
 
@@ -96,21 +126,26 @@ def read_split(
 
 
 def _read_parquet_row_range(
-    path: str,
+    original_path: str,
+    resolved_path: str,
     row_range: RowRange,
     columns: list[str] | None,
     filters: pc.Expression | None,
     batch_size: int,
     arrow_fs: pafs.FileSystem | None,
+    partitioning: str | None,
 ) -> Iterator[pa.RecordBatch]:
     """Read a RowRange from a Parquet file using row group random access.
 
     Finds the row groups that cover [row_range.offset, row_range.offset + row_range.length),
     reads only those row groups (true seek, no full scan), applies filters, and yields
     RecordBatches of batch_size rows.
+
+    When partitioning="hive", parses key=value segments from the original file path and
+    attaches them as constant string columns to each batch.
     """
     kwargs = {"filesystem": arrow_fs} if arrow_fs is not None else {}
-    pf = pq.ParquetFile(path, **kwargs)
+    pf = pq.ParquetFile(resolved_path, **kwargs)
     meta = pf.metadata
 
     target_start = row_range.offset
@@ -140,6 +175,16 @@ def _read_parquet_row_range(
     if filters is not None and columns is not None:
         table = table.select(columns)
 
+    # Attach Hive partition columns if requested
+    if partitioning == "hive":
+        hive_parts = _parse_hive_partitions(original_path)
+        for col_name, col_value in hive_parts.items():
+            if col_name not in table.schema.names:
+                table = table.append_column(
+                    col_name,
+                    pa.array([col_value] * len(table), type=pa.string()),
+                )
+
     # Yield in batch_size chunks
     offset = 0
     while offset < len(table):
@@ -166,3 +211,4 @@ def _get_arrow_filesystem(
     logger.debug("Wrapping %s filesystem in PyFileSystem for path: %s", type(fs).__name__, resolved)
     arrow_fs = pafs.PyFileSystem(pafs.FSSpecHandler(fs))
     return arrow_fs, resolved
+

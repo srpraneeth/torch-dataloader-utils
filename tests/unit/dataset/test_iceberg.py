@@ -57,6 +57,91 @@ class TestRequirePyiceberg:
 
 
 # ---------------------------------------------------------------------------
+# _try_to_iceberg
+# ---------------------------------------------------------------------------
+
+class TestTryToIceberg:
+    """Tests for the pc.Expression → pyiceberg BooleanExpression translator."""
+
+    def _t(self, expr):
+        from torch_dataloader_utils.dataset.iceberg import _try_to_iceberg
+        return _try_to_iceberg(expr)
+
+    # --- comparison operators with integer literals ---
+
+    def test_gte_integer(self):
+        from pyiceberg.expressions import GreaterThanOrEqual
+        r = self._t(pc.field("row_id") >= 1875)
+        assert isinstance(r, GreaterThanOrEqual)
+        assert r.term.name == "row_id"
+        assert r.literal.value == 1875
+
+    def test_gt_integer(self):
+        from pyiceberg.expressions import GreaterThan
+        r = self._t(pc.field("score") > 0)
+        assert isinstance(r, GreaterThan)
+        assert r.term.name == "score"
+
+    def test_lte_integer(self):
+        from pyiceberg.expressions import LessThanOrEqual
+        assert isinstance(self._t(pc.field("count") <= 100), LessThanOrEqual)
+
+    def test_lt_integer(self):
+        from pyiceberg.expressions import LessThan
+        assert isinstance(self._t(pc.field("count") < 50), LessThan)
+
+    def test_eq_integer(self):
+        from pyiceberg.expressions import EqualTo
+        r = self._t(pc.field("label") == 1)
+        assert isinstance(r, EqualTo)
+        assert r.literal.value == 1
+
+    def test_ne_integer(self):
+        from pyiceberg.expressions import NotEqualTo
+        assert isinstance(self._t(pc.field("label") != 0), NotEqualTo)
+
+    # --- other literal types ---
+
+    def test_eq_string(self):
+        from pyiceberg.expressions import EqualTo
+        r = self._t(pc.field("region") == "us")
+        assert isinstance(r, EqualTo)
+        assert r.literal.value == "us"
+
+    def test_gt_float(self):
+        from pyiceberg.expressions import GreaterThan
+        r = self._t(pc.field("score") > 0.5)
+        assert isinstance(r, GreaterThan)
+        assert abs(r.literal.value - 0.5) < 1e-9
+
+    # --- compound expressions ---
+
+    def test_and_combination(self):
+        from pyiceberg.expressions import And
+        r = self._t((pc.field("row_id") >= 100) & (pc.field("label") == 1))
+        assert isinstance(r, And)
+
+    def test_or_combination(self):
+        from pyiceberg.expressions import Or
+        r = self._t((pc.field("region") == "us") | (pc.field("region") == "eu"))
+        assert isinstance(r, Or)
+
+    # --- untranslatable expressions return None ---
+
+    def test_returns_none_for_field_vs_field(self):
+        """field >= field has no scalar literal — cannot translate."""
+        r = self._t(pc.field("a") >= pc.field("b"))
+        assert r is None
+
+    def test_returns_none_when_pyiceberg_not_installed(self):
+        """Returns None gracefully when pyiceberg.expressions is absent."""
+        from torch_dataloader_utils.dataset.iceberg import _try_to_iceberg
+        with patch.dict(sys.modules, {"pyiceberg.expressions": None}):
+            r = _try_to_iceberg(pc.field("x") >= 1)
+        assert r is None
+
+
+# ---------------------------------------------------------------------------
 # _detect_format
 # ---------------------------------------------------------------------------
 
@@ -294,6 +379,134 @@ class TestAutoSelectStrategy:
 
         strategy = _auto_select_strategy([], shuffle=False, shuffle_seed=42)
         assert isinstance(strategy, RoundRobinSplitStrategy)
+
+    def test_split_bytes_string_forwarded_to_strategy(self):
+        """split_bytes='10MiB' is parsed and stored on the strategy."""
+        from torch_dataloader_utils.dataset.iceberg import _auto_select_strategy
+        from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
+
+        files = [_make_info("s3://bucket/a.parquet")]
+        strategy = _auto_select_strategy(files, shuffle=False, shuffle_seed=42, split_bytes="10MiB")
+        assert isinstance(strategy, TargetSizeSplitStrategy)
+        assert strategy.target_bytes == 10 * 1024 * 1024
+
+    def test_split_rows_forwarded_to_strategy(self):
+        """split_rows is forwarded as target_rows to TargetSizeSplitStrategy."""
+        from torch_dataloader_utils.dataset.iceberg import _auto_select_strategy
+        from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
+
+        files = [_make_info("s3://bucket/a.parquet")]
+        strategy = _auto_select_strategy(files, shuffle=False, shuffle_seed=42, split_rows=5000)
+        assert isinstance(strategy, TargetSizeSplitStrategy)
+        assert strategy.target_rows == 5000
+
+
+# ---------------------------------------------------------------------------
+# scan_filter auto-derivation
+# ---------------------------------------------------------------------------
+
+class TestAutoDeriveScanFilter:
+    """Tests for the automatic scan_filter derivation from pc.Expression filters."""
+
+    def _make_files(self, tmpdir):
+        import os
+        path = os.path.join(tmpdir, "a.parquet")
+        pq.write_table(pa.table({"x": pa.array([1, 2, 3], pa.int32())}), path)
+        return [IcebergDataFileInfo(
+            path=path, file_size=os.path.getsize(path), record_count=3, snapshot_id=1,
+        )]
+
+    def test_translatable_filters_derives_scan_filter(self):
+        """When filters translates successfully, the derived iceberg expr reaches _resolve_files."""
+        from pyiceberg.expressions import GreaterThanOrEqual
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = self._make_files(tmpdir)
+            with patch(
+                "torch_dataloader_utils.dataset.iceberg._resolve_files",
+                return_value=(files, False, {}),
+            ) as mock_resolve:
+                with patch("torch_dataloader_utils.dataset.iceberg._require_pyiceberg"):
+                    from torch_dataloader_utils.dataset.iceberg import IcebergDataset
+
+                    IcebergDataset(
+                        table="db.tbl",
+                        catalog_config={},
+                        num_workers=1,
+                        filters=pc.field("row_id") >= 100,
+                    )
+
+                _, call_kwargs = mock_resolve.call_args
+                derived = call_kwargs.get("scan_filter") or mock_resolve.call_args[0][3]
+                assert isinstance(derived, GreaterThanOrEqual)
+                assert derived.term.name == "row_id"
+
+    def test_untranslatable_filters_leaves_scan_filter_none(self):
+        """When filters cannot be translated, _resolve_files is called without scan_filter."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = self._make_files(tmpdir)
+            with patch(
+                "torch_dataloader_utils.dataset.iceberg._resolve_files",
+                return_value=(files, False, {}),
+            ) as mock_resolve:
+                with patch("torch_dataloader_utils.dataset.iceberg._require_pyiceberg"):
+                    from torch_dataloader_utils.dataset.iceberg import IcebergDataset
+
+                    IcebergDataset(
+                        table="db.tbl",
+                        catalog_config={},
+                        num_workers=1,
+                        filters=pc.field("a") >= pc.field("b"),  # field vs field — untranslatable
+                    )
+
+                _, call_kwargs = mock_resolve.call_args
+                derived = call_kwargs.get("scan_filter") or mock_resolve.call_args[0][3]
+                assert derived is None
+
+    def test_explicit_scan_filter_not_overridden_by_derivation(self):
+        """Explicit scan_filter takes precedence — _try_to_iceberg is not called."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = self._make_files(tmpdir)
+            explicit = MagicMock(name="explicit_scan_filter")
+            with patch(
+                "torch_dataloader_utils.dataset.iceberg._resolve_files",
+                return_value=(files, False, {}),
+            ) as mock_resolve:
+                with patch("torch_dataloader_utils.dataset.iceberg._require_pyiceberg"):
+                    with patch(
+                        "torch_dataloader_utils.dataset.iceberg._try_to_iceberg"
+                    ) as mock_translate:
+                        from torch_dataloader_utils.dataset.iceberg import IcebergDataset
+
+                        IcebergDataset(
+                            table="db.tbl",
+                            catalog_config={},
+                            num_workers=1,
+                            filters=pc.field("row_id") >= 100,
+                            scan_filter=explicit,
+                        )
+
+                mock_translate.assert_not_called()
+                _, call_kwargs = mock_resolve.call_args
+                passed = call_kwargs.get("scan_filter") or mock_resolve.call_args[0][3]
+                assert passed is explicit
+
+    def test_no_filters_no_scan_filter(self):
+        """With neither filters nor scan_filter, _resolve_files gets scan_filter=None."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = self._make_files(tmpdir)
+            with patch(
+                "torch_dataloader_utils.dataset.iceberg._resolve_files",
+                return_value=(files, False, {}),
+            ) as mock_resolve:
+                with patch("torch_dataloader_utils.dataset.iceberg._require_pyiceberg"):
+                    from torch_dataloader_utils.dataset.iceberg import IcebergDataset
+
+                    IcebergDataset(table="db.tbl", catalog_config={}, num_workers=1)
+
+                _, call_kwargs = mock_resolve.call_args
+                passed = call_kwargs.get("scan_filter") or mock_resolve.call_args[0][3]
+                assert passed is None
 
 
 # ---------------------------------------------------------------------------
@@ -626,3 +839,246 @@ class TestCreateDataloaderUnit:
         # When output_format != "torch" and no explicit collate_fn,
         # create_dataloader sets an identity collate_fn
         assert loader.collate_fn is not None
+
+    def test_scan_filter_forwarded_through_create_dataloader(self):
+        """create_dataloader forwards scan_filter to _resolve_files."""
+        mock_filter = MagicMock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            info = _write_parquet(tmpdir, [1, 2, 3])
+            with patch(
+                "torch_dataloader_utils.dataset.iceberg._resolve_files",
+                return_value=([info], False, {}),
+            ) as mock_resolve:
+                with patch("torch_dataloader_utils.dataset.iceberg._require_pyiceberg"):
+                    from torch_dataloader_utils.dataset.iceberg import IcebergDataset
+
+                    IcebergDataset.create_dataloader(
+                        table="db.table",
+                        catalog_config={"type": "rest"},
+                        num_workers=1,
+                        scan_filter=mock_filter,
+                    )
+
+        _, call_kwargs = mock_resolve.call_args
+        assert call_kwargs.get("scan_filter") is mock_filter or mock_resolve.call_args[0][3] is mock_filter
+
+
+# ---------------------------------------------------------------------------
+# _resolve_files — exercises lines 65-124 via mocked pyiceberg.catalog
+# ---------------------------------------------------------------------------
+
+class TestResolveFiles:
+    """Execute _resolve_files with a mocked pyiceberg.catalog to cover lines 65-124."""
+
+    def _build_pyiceberg_catalog_mock(
+        self,
+        paths: list[str],
+        has_deletes: bool = False,
+        snapshot_id: int = 42,
+        with_partition: bool = False,
+    ):
+        """Return (sys.modules patch dict, fake_catalog, fake_table)."""
+        fake_tasks = []
+        delete_stub = MagicMock()
+        delete_stub.file_path = "s3://bucket/pos-deletes.avro"
+
+        for path in paths:
+            data_file = MagicMock()
+            data_file.file_path = path
+            data_file.file_size_in_bytes = 2048
+            data_file.record_count = 100
+            data_file.partition = {"dt": "2024-01-01"} if with_partition else None
+            task = MagicMock()
+            task.file = data_file
+            # Non-empty list is truthy; empty list is falsy
+            task.delete_files = [delete_stub] if has_deletes else []
+            fake_tasks.append(task)
+
+        fake_snap = MagicMock()
+        fake_snap.snapshot_id = snapshot_id
+
+        fake_table = MagicMock()
+        fake_table.scan.return_value.plan_files.return_value = fake_tasks
+        fake_table.current_snapshot.return_value = fake_snap
+
+        fake_catalog = MagicMock()
+        fake_catalog.load_table.return_value = fake_table
+
+        fake_catalog_mod = MagicMock()
+        fake_catalog_mod.load_catalog.return_value = fake_catalog
+
+        return {"pyiceberg.catalog": fake_catalog_mod}, fake_catalog, fake_table
+
+    # --- basic returns ---
+
+    def test_returns_files_no_deletes(self):
+        paths = ["s3://bucket/a.parquet", "s3://bucket/b.parquet"]
+        mods, _, _ = self._build_pyiceberg_catalog_mock(paths)
+
+        with patch.dict(sys.modules, mods):
+            from torch_dataloader_utils.dataset.iceberg import _resolve_files
+            files, has_deletes, delete_paths = _resolve_files("db.tbl", {"name": "test"}, None)
+
+        assert len(files) == 2
+        assert has_deletes is False
+        assert delete_paths == {}
+        assert files[0].path == paths[0]
+        assert files[1].path == paths[1]
+
+    def test_file_size_and_record_count_populated(self):
+        mods, _, _ = self._build_pyiceberg_catalog_mock(["s3://bucket/a.parquet"])
+
+        with patch.dict(sys.modules, mods):
+            from torch_dataloader_utils.dataset.iceberg import _resolve_files
+            files, _, _ = _resolve_files("db.tbl", {"name": "test"}, None)
+
+        assert files[0].file_size == 2048
+        assert files[0].record_count == 100
+
+    # --- partition handling ---
+
+    def test_partition_stored_when_present(self):
+        mods, _, _ = self._build_pyiceberg_catalog_mock(
+            ["s3://bucket/a.parquet"], with_partition=True
+        )
+
+        with patch.dict(sys.modules, mods):
+            from torch_dataloader_utils.dataset.iceberg import _resolve_files
+            files, _, _ = _resolve_files("db.tbl", {"name": "test"}, None)
+
+        assert files[0].partition == {"dt": "2024-01-01"}
+
+    def test_no_partition_stored_as_none(self):
+        mods, _, _ = self._build_pyiceberg_catalog_mock(
+            ["s3://bucket/a.parquet"], with_partition=False
+        )
+
+        with patch.dict(sys.modules, mods):
+            from torch_dataloader_utils.dataset.iceberg import _resolve_files
+            files, _, _ = _resolve_files("db.tbl", {"name": "test"}, None)
+
+        assert files[0].partition is None
+
+    # --- delete file detection ---
+
+    def test_has_deletes_true_when_delete_files_present(self):
+        mods, _, _ = self._build_pyiceberg_catalog_mock(
+            ["s3://bucket/a.parquet"], has_deletes=True
+        )
+
+        with patch.dict(sys.modules, mods):
+            from torch_dataloader_utils.dataset.iceberg import _resolve_files
+            files, has_deletes, delete_paths = _resolve_files("db.tbl", {"name": "test"}, None)
+
+        assert has_deletes is True
+        assert "s3://bucket/a.parquet" in delete_paths
+        assert "s3://bucket/pos-deletes.avro" in delete_paths["s3://bucket/a.parquet"]
+
+    def test_has_deletes_false_no_delete_files(self):
+        mods, _, _ = self._build_pyiceberg_catalog_mock(
+            ["s3://bucket/a.parquet"], has_deletes=False
+        )
+
+        with patch.dict(sys.modules, mods):
+            from torch_dataloader_utils.dataset.iceberg import _resolve_files
+            files, has_deletes, delete_paths = _resolve_files("db.tbl", {"name": "test"}, None)
+
+        assert has_deletes is False
+        assert delete_paths == {}
+
+    # --- snapshot_id branches ---
+
+    def test_current_snapshot_used_when_snapshot_id_is_none(self):
+        mods, _, fake_table = self._build_pyiceberg_catalog_mock(
+            ["s3://bucket/a.parquet"], snapshot_id=77
+        )
+
+        with patch.dict(sys.modules, mods):
+            from torch_dataloader_utils.dataset.iceberg import _resolve_files
+            files, _, _ = _resolve_files("db.tbl", {"name": "test"}, snapshot_id=None)
+
+        fake_table.current_snapshot.assert_called()
+        assert files[0].snapshot_id == 77
+
+    def test_explicit_snapshot_id_used_directly(self):
+        mods, _, fake_table = self._build_pyiceberg_catalog_mock(
+            ["s3://bucket/a.parquet"], snapshot_id=99
+        )
+
+        with patch.dict(sys.modules, mods):
+            from torch_dataloader_utils.dataset.iceberg import _resolve_files
+            files, _, _ = _resolve_files("db.tbl", {"name": "test"}, snapshot_id=99)
+
+        # When snapshot_id is provided it's passed directly to scan
+        fake_table.scan.assert_called_with(snapshot_id=99)
+        # snapshot_id stored on each file comes from the argument, not current_snapshot
+        assert files[0].snapshot_id == 99
+
+    # --- table identifier branches ---
+
+    def test_two_part_identifier_loads_as_is(self):
+        mods, fake_catalog, _ = self._build_pyiceberg_catalog_mock(["s3://bucket/a.parquet"])
+
+        with patch.dict(sys.modules, mods):
+            from torch_dataloader_utils.dataset.iceberg import _resolve_files
+            _resolve_files("db.tbl", {"name": "test"}, None)
+
+        fake_catalog.load_table.assert_called_once_with("db.tbl")
+
+    def test_three_part_identifier_loads_second_and_third_parts(self):
+        mods, fake_catalog, _ = self._build_pyiceberg_catalog_mock(["s3://bucket/a.parquet"])
+
+        with patch.dict(sys.modules, mods):
+            from torch_dataloader_utils.dataset.iceberg import _resolve_files
+            _resolve_files("namespace.db.tbl", {"name": "test"}, None)
+
+        fake_catalog.load_table.assert_called_once_with("db.tbl")
+
+    # --- catalog_config forwarded to load_catalog ---
+
+    def test_catalog_config_forwarded_to_load_catalog(self):
+        mods, _, _ = self._build_pyiceberg_catalog_mock(["s3://bucket/a.parquet"])
+        cfg = {"name": "my_catalog", "uri": "https://catalog.example.com"}
+
+        with patch.dict(sys.modules, mods):
+            from torch_dataloader_utils.dataset.iceberg import _resolve_files
+            _resolve_files("db.tbl", cfg, None)
+
+        mods["pyiceberg.catalog"].load_catalog.assert_called_once_with(**cfg)
+
+    # --- scan_filter forwarding ---
+
+    def test_scan_filter_forwarded_to_table_scan(self):
+        """scan_filter is passed as row_filter= to table.scan()."""
+        mods, _, fake_table = self._build_pyiceberg_catalog_mock(["s3://bucket/a.parquet"])
+        mock_filter = MagicMock()
+
+        with patch.dict(sys.modules, mods):
+            from torch_dataloader_utils.dataset.iceberg import _resolve_files
+            _resolve_files("db.tbl", {"name": "test"}, None, scan_filter=mock_filter)
+
+        fake_table.scan.assert_called_with(snapshot_id=None, row_filter=mock_filter)
+
+    def test_scan_filter_none_does_not_add_row_filter(self):
+        """When scan_filter=None, table.scan is called without row_filter."""
+        mods, _, fake_table = self._build_pyiceberg_catalog_mock(["s3://bucket/a.parquet"])
+
+        with patch.dict(sys.modules, mods):
+            from torch_dataloader_utils.dataset.iceberg import _resolve_files
+            _resolve_files("db.tbl", {"name": "test"}, None, scan_filter=None)
+
+        fake_table.scan.assert_called_with(snapshot_id=None)
+
+    def test_scan_filter_with_snapshot_id(self):
+        """scan_filter and snapshot_id are both forwarded correctly."""
+        mods, _, fake_table = self._build_pyiceberg_catalog_mock(
+            ["s3://bucket/a.parquet"], snapshot_id=55
+        )
+        mock_filter = MagicMock()
+
+        with patch.dict(sys.modules, mods):
+            from torch_dataloader_utils.dataset.iceberg import _resolve_files
+            _resolve_files("db.tbl", {"name": "test"}, snapshot_id=55, scan_filter=mock_filter)
+
+        fake_table.scan.assert_called_with(snapshot_id=55, row_filter=mock_filter)

@@ -22,6 +22,43 @@ def _install_hint(path: str) -> str:
     return _BACKEND_INSTALL.get(scheme, f"pip install torch-dataloader-utils")
 
 
+def _raise_clean_fs_error(exc: Exception, path: str) -> None:
+    """Re-raise *exc* as a more actionable error type based on its message.
+
+    Inspects the exception message for known keywords so that no direct
+    dependency on boto3/gcsfs/adlfs is required in the detection logic.
+    """
+    msg = str(exc).lower()
+
+    credential_keywords = ("credential", "no credentials", "accessdenied", "autherror",
+                           "authenticationerror", "could not connect", "no auth", "unauthorized")
+    forbidden_keywords = ("403", "forbidden", "permission denied", "access denied",
+                          "accessforbidden", "not authorized")
+    notfound_keywords = ("404", "not found", "nosuchbucket", "nosuchkey", "no such file",
+                         "does not exist", "entitynotfound")
+    timeout_keywords = ("timeout", "timed out", "connection timed out")
+    ssl_keywords = ("ssl", "certificate", "tls", "handshake")
+
+    if any(k in msg for k in credential_keywords):
+        raise PermissionError(
+            f"No credentials found for path {path!r} — "
+            "set environment variables (e.g. AWS_ACCESS_KEY_ID) or pass storage_options"
+        ) from exc
+    if any(k in msg for k in forbidden_keywords):
+        raise PermissionError(
+            f"Access denied for path {path!r} — check IAM roles or bucket policy"
+        ) from exc
+    if any(k in msg for k in notfound_keywords):
+        raise FileNotFoundError(f"Path not found: {path}") from exc
+    if any(k in msg for k in timeout_keywords):
+        raise TimeoutError(f"Connection timed out for path {path!r}") from exc
+    if any(k in msg for k in ssl_keywords):
+        raise OSError(f"SSL error connecting to {path!r}") from exc
+
+    # Unknown error — re-raise unchanged
+    raise
+
+
 def discover_files(
     path: str,
     storage_options: dict | None = None,
@@ -40,6 +77,9 @@ def discover_files(
 
     Raises:
         FileNotFoundError: When the path does not exist.
+        PermissionError: When credentials are missing or access is denied.
+        TimeoutError: When the connection times out.
+        OSError: When an SSL/TLS error occurs.
         ImportError: When a required optional backend is not installed.
     """
     opts = storage_options or {}
@@ -57,21 +97,26 @@ def discover_files(
     # --- determine path type and collect raw stat entries ---
     is_glob = "*" in path or "?" in path
 
-    if is_glob:
-        matched = fs.glob(resolved)
-        logger.debug("Glob matched %d path(s) for pattern %s", len(matched), resolved)
-        # glob returns paths — collect stat for each
-        stats = [fs.stat(p) for p in matched if fs.isfile(p)]
-    elif fs.exists(resolved):
-        if fs.isdir(resolved):
-            entries = fs.ls(resolved, detail=True)
-            stats = [e for e in entries if e.get("type", "").lower() == "file"]
-            logger.debug("Directory listing: %d entries, %d file(s)", len(entries), len(stats))
+    try:
+        if is_glob:
+            matched = fs.glob(resolved)
+            logger.debug("Glob matched %d path(s) for pattern %s", len(matched), resolved)
+            # glob returns paths — collect stat for each
+            stats = [fs.stat(p) for p in matched if fs.isfile(p)]
+        elif fs.exists(resolved):
+            if fs.isdir(resolved):
+                entries = fs.ls(resolved, detail=True)
+                stats = [e for e in entries if e.get("type", "").lower() == "file"]
+                logger.debug("Directory listing: %d entries, %d file(s)", len(entries), len(stats))
+            else:
+                stats = [fs.stat(resolved)]
+                logger.debug("Single file path detected")
         else:
-            stats = [fs.stat(resolved)]
-            logger.debug("Single file path detected")
-    else:
-        raise FileNotFoundError(f"Path not found: {path}")
+            raise FileNotFoundError(f"Path not found: {path}")
+    except (FileNotFoundError, ImportError):
+        raise
+    except Exception as exc:
+        _raise_clean_fs_error(exc, path)
 
     # --- determine scheme prefix to restore on fsspec-internal paths ---
     # fsspec strips the scheme from paths returned in stat/ls/glob results.
@@ -112,3 +157,4 @@ def discover_files(
         sum(f.file_size for f in files if f.file_size is not None) or "unknown",
     )
     return files
+
