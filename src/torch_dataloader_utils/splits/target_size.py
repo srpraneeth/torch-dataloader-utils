@@ -11,6 +11,29 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TARGET_BYTES = 128 * 1024 * 1024  # 128 MiB
 
+_BYTE_UNITS = {
+    "tib": 1024**4, "tb": 1000**4,
+    "gib": 1024**3, "gb": 1000**3,
+    "mib": 1024**2, "mb": 1000**2,
+    "kib": 1024,    "kb": 1000,
+    "b":   1,
+}
+
+
+def parse_bytes(value: int | str) -> int:
+    """Parse a byte size expressed as an int or human-readable string.
+
+    Supported suffixes (case-insensitive): B, KB, KiB, MB, MiB, GB, GiB, TB, TiB.
+    Examples: 10485760, "10MiB", "128 MiB", "1GiB", "512mb".
+    """
+    if isinstance(value, int):
+        return value
+    s = value.strip().lower()
+    for suffix, multiplier in _BYTE_UNITS.items():
+        if s.endswith(suffix):
+            num = s[: -len(suffix)].strip()
+            return int(float(num) * multiplier)
+    return int(s)  # bare number string e.g. "10485760"
 
 def _parquet_chunks(
     file: DataFileInfo,
@@ -104,12 +127,12 @@ class TargetSizeSplitStrategy:
 
     def __init__(
         self,
-        target_bytes: int = _DEFAULT_TARGET_BYTES,
+        target_bytes: int | str = _DEFAULT_TARGET_BYTES,
         target_rows: int | None = None,
         shuffle: bool = False,
         seed: int = 42,
     ) -> None:
-        self.target_bytes = target_bytes
+        self.target_bytes = parse_bytes(target_bytes)
         self.target_rows = target_rows
         self.shuffle = shuffle
         self.seed = seed

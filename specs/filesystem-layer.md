@@ -40,6 +40,23 @@ The system SHALL support any fsspec-compatible backend via path scheme auto-dete
 The system SHALL raise an `ImportError` with the install command when an optional
 backend package (s3fs, gcsfs, adlfs) is not installed.
 
+### Error Surfacing `[v1]`
+The system SHALL catch fsspec runtime errors and re-raise them with actionable messages.
+The system SHALL map error conditions as follows:
+
+| Condition | Raised type | Message hint |
+|-----------|-------------|--------------|
+| Missing credentials (no AWS/GCS/Azure env vars) | `PermissionError` | "No credentials found — set env vars or pass storage_options" |
+| Permission denied / HTTP 403 | `PermissionError` | "Access denied — check IAM roles or bucket policy" |
+| Path/bucket not found / HTTP 404 | `FileNotFoundError` | "Path not found: {path}" |
+| Network timeout | `TimeoutError` | "Connection timed out" |
+| SSL / TLS error | `OSError` | "SSL error" |
+| Unknown errors | re-raised unchanged | — |
+
+The system SHALL detect error type by inspecting the exception message for keywords
+(e.g. "credential", "403", "timeout") so that no direct dependency on boto3/gcsfs/adlfs
+is required in the detection logic.
+
 ### Format Filtering `[v1]`
 The system SHALL accept an optional `extensions` parameter (e.g. `[".parquet", ".orc"]`).
 When `extensions` is provided the system SHALL exclude files that do not match.

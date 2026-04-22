@@ -19,50 +19,88 @@ create_dataloader()
 
 ### Construction `[v1]`
 The system SHALL accept the following parameters at construction:
+
+**StructuredDataset:**
 - `path: str` — passed to `discover_files()`
 - `format: str` — parquet, orc, csv, json, jsonl
 - `batch_size: int` — default 1024
 - `columns: list[str] | None` — column projection
-- `filters: pc.Expression | None` — predicate pushdown
+- `filters: pc.Expression | None` — row-level predicate pushdown via pyarrow
 - `shuffle: bool` — default False
 - `shuffle_seed: int` — default 42
+- `split_bytes: int | str | None` — target chunk size (e.g. `"128MiB"`, `10_485_760`). None = 128 MiB default
+- `split_rows: int | None` — target rows per chunk (overrides split_bytes when set)
 - `split_strategy: SplitStrategy | None` — None = auto-select
 - `num_workers: int | None` — None = auto-detect via `max(1, os.cpu_count() - 1)`
 - `output_format: str` — torch | numpy | arrow | dict, default "torch"
 - `storage_options: dict | None` — forwarded to fsspec and read_split
 - `collate_fn: Callable | None` — forwarded to DataLoader
+- `partitioning: str | None` — None = no partitioning decoding; `"hive"` = decode Hive-style directory partitions
+
+**IcebergDataset** (all StructuredDataset params except `path`/`format`, plus):
+- `table: str` — fully qualified table identifier (e.g. `"my_db.my_table"` or `"ns.db.table"`)
+- `catalog_config: dict` — forwarded directly to `pyiceberg.catalog.load_catalog()`
+- `snapshot_id: int | None` — None = current snapshot; provide for time travel
+- `scan_filter` — pyiceberg `BooleanExpression` pushed into `table.scan(row_filter=...)` at plan_files() time. Prunes entire partitions and files before splits are generated. Use alongside `filters` for belt-and-suspenders filtering.
 
 The system SHALL raise `ValueError` for unsupported `format` values at construction time.
 The system SHALL raise `ValueError` for unsupported `output_format` values at construction time.
 The system SHALL raise `ValueError` when `output_format` is `"arrow"` or `"dict"` and `collate_fn` is None.
+`IcebergDataset` SHALL raise `FileNotFoundError` when no data files are found after scan.
 
 ### File Discovery `[v1]`
 File discovery SHALL happen once at `create_dataloader()` time via `discover_files()`.
 The discovered `list[DataFileInfo]` SHALL be stored on the dataset instance.
 
+### Iceberg Scan-Level Predicate Pushdown `[v1]`
+When `scan_filter` is provided, it SHALL be passed to `table.scan(row_filter=scan_filter)`.
+This causes `plan_files()` to exclude partitions and files that cannot satisfy the predicate.
+The `scan_filter` SHALL be applied before split generation — splits are computed only over surviving files.
+`scan_filter` accepts native pyiceberg expressions (`GreaterThan`, `LessThan`, etc.) — NOT pyarrow expressions.
+`filters` (pyarrow) and `scan_filter` (pyiceberg) MAY be used together for belt-and-suspenders filtering.
+
+### Scan-Filter Auto-Derivation `[v1]`
+When `scan_filter=None` and `filters` is provided, the system SHALL attempt to translate the `pc.Expression` into a pyiceberg `BooleanExpression` and use it as `scan_filter`.
+
+Supported translations:
+- Comparisons with scalar literals: `>=` → `GreaterThanOrEqual`, `>` → `GreaterThan`, `<=` → `LessThanOrEqual`, `<` → `LessThan`, `==` → `EqualTo`, `!=` → `NotEqualTo`
+- Literal types: integers, floats, strings
+- Compound: `&` → `And`, `|` → `Or` (arbitrarily nested)
+
+When translation succeeds, the system SHALL log at `INFO`: `"Auto-derived scan_filter: pc.Expression <X> → pyiceberg <Y>"`.
+When translation fails (unsupported expression or pyiceberg not installed), the system SHALL log at `DEBUG` and fall back to row-level filtering only — no error is raised.
+When `scan_filter` is explicitly provided alongside `filters`, the explicit value SHALL be used without attempting translation.
+
 ### Split Generation `[v1]`
-Split generation SHALL happen at the start of each `__iter__()` call.
-Split generation SHALL be skipped when `shuffle=False` and splits are already cached.
-When `shuffle=True` splits SHALL be regenerated each epoch using `shuffle_seed + epoch`.
-The `_epoch` counter SHALL increment each time `__iter__()` is called.
+Splits SHALL be generated once at construction time and cached on `_splits`.
+When `shuffle=True`, splits SHALL be regenerated each time `set_epoch(n)` is called using `shuffle_seed + epoch`.
+`set_epoch()` SHALL be called in the main process before each epoch.
 
 ### Strategy Auto-Selection `[v1]`
 When `split_strategy=None` the system SHALL auto-select:
-- All files have `record_count` → `SizeBalancedSplitStrategy`
-- All files have `file_size` → `SizeBalancedSplitStrategy`
-- Otherwise → `RoundRobinSplitStrategy`
+- Non-empty file list → `TargetSizeSplitStrategy`
+- Empty file list → `RoundRobinSplitStrategy`
+
+`TargetSizeSplitStrategy` behaviour:
+- Parquet files: read row group metadata from file footer (no data scan), pack consecutive row groups into chunks targeting `split_bytes`. Each chunk becomes a `FileSplit` with a `RowRange`.
+- Non-Parquet files: treated as a single unsplittable chunk (no footer metadata).
+- `split_rows` overrides `split_bytes` when both are set.
+- Chunks are distributed across workers using a greedy min-heap (LPT scheduling) — minimises maximum worker load for unequal chunk sizes.
+- Default `target_bytes` = 128 MiB.
+
 The system SHALL log the selected strategy at `INFO` level.
 
 ### Worker Assignment `[v1]`
-Each worker SHALL read exactly one `Split`.
 The system SHALL use `torch.utils.data.get_worker_info()` to determine the current worker index.
-When `num_workers=0` (single process) the system SHALL use split index 0.
-The system SHALL raise `RuntimeError` if `get_worker_info().num_workers` does not match the number of splits.
+When `num_workers=0` (single process) the system SHALL use shard index 0.
+Workers with `worker_id >= len(shards)` SHALL yield nothing (more workers than shards).
 
 ### Iteration `[v1]`
-Each worker SHALL call `read_split()` with its assigned `Split`.
+Each worker SHALL call `read_split()` with its assigned `Shard`.
 Each worker SHALL yield one item per `RecordBatch` after output format conversion.
 The system SHALL NOT buffer or accumulate batches — yield immediately.
+
+When `has_deletes=True` (Iceberg tables with position delete files), each worker SHALL reconnect to the catalog and use `pyiceberg.io.pyarrow.ArrowScan` to apply position deletes. Sub-file row-range splitting is disabled in this path — file-granularity splits only.
 
 ### Output Format Conversion `[v1]`
 The system SHALL convert each `pyarrow.RecordBatch` to the requested `output_format`:
@@ -92,13 +130,14 @@ The system SHALL log the resolved value at `INFO` level.
 
 ### `create_dataloader()` `[v1]`
 The system SHALL provide a `create_dataloader()` classmethod as the primary entry point.
-It SHALL perform file discovery, strategy selection, and return a `DataLoader`.
+It SHALL perform file discovery, strategy selection, and return a `(DataLoader, dataset)` tuple.
 It SHALL construct `DataLoader(dataset, batch_size=None, num_workers=N, collate_fn=collate_fn)`.
 `batch_size=None` is always passed — Arrow owns batching, not DataLoader.
 
 ### Logging `[v1]`
-The system SHALL log at `INFO`: path, format, num_workers, split strategy selected, file count.
-The system SHALL log at `DEBUG`: worker index, split id assigned, files in split.
+The system SHALL log at `INFO`: path/table, format, num_workers, split strategy selected, file count, per-file breakdown, inferred schema.
+The system SHALL log at `INFO` per worker: shard id, number of splits, per-split file name + row range + row count.
+The system SHALL log at `DEBUG`: worker index, file paths in split.
 
 ---
 
@@ -115,13 +154,17 @@ class StructuredDataset(IterableDataset):
         filters: pc.Expression | None = None,
         shuffle: bool = False,
         shuffle_seed: int = 42,
+        split_bytes: int | str | None = None,
+        split_rows: int | None = None,
         split_strategy: SplitStrategy | None = None,
         num_workers: int = 1,
         output_format: str = "torch",
         storage_options: dict | None = None,
         collate_fn: Callable | None = None,
+        partitioning: str | None = None,
     ) -> None: ...
 
+    def set_epoch(self, epoch: int) -> None: ...
     def __iter__(self) -> Iterator: ...
 
     @classmethod
@@ -134,12 +177,59 @@ class StructuredDataset(IterableDataset):
         filters: pc.Expression | None = None,
         shuffle: bool = False,
         shuffle_seed: int = 42,
+        split_bytes: int | str | None = None,
+        split_rows: int | None = None,
         split_strategy: SplitStrategy | None = None,
         num_workers: int | None = None,
         output_format: str = "torch",
         storage_options: dict | None = None,
         collate_fn: Callable | None = None,
-    ) -> DataLoader: ...
+        partitioning: str | None = None,
+    ) -> tuple[DataLoader, "StructuredDataset"]: ...
+
+
+class IcebergDataset(IterableDataset):
+    def __init__(
+        self,
+        table: str,
+        catalog_config: dict,
+        batch_size: int = 1024,
+        columns: list[str] | None = None,
+        filters: pc.Expression | None = None,
+        scan_filter: Any | None = None,
+        snapshot_id: int | None = None,
+        shuffle: bool = False,
+        shuffle_seed: int = 42,
+        split_bytes: int | str | None = None,
+        split_rows: int | None = None,
+        split_strategy: SplitStrategy | None = None,
+        num_workers: int = 1,
+        output_format: str = "torch",
+        collate_fn: Callable | None = None,
+    ) -> None: ...
+
+    def set_epoch(self, epoch: int) -> None: ...
+    def __iter__(self) -> Iterator: ...
+
+    @classmethod
+    def create_dataloader(
+        cls,
+        table: str,
+        catalog_config: dict,
+        batch_size: int = 1024,
+        columns: list[str] | None = None,
+        filters: pc.Expression | None = None,
+        scan_filter: Any | None = None,
+        snapshot_id: int | None = None,
+        shuffle: bool = False,
+        shuffle_seed: int = 42,
+        split_bytes: int | str | None = None,
+        split_rows: int | None = None,
+        split_strategy: SplitStrategy | None = None,
+        num_workers: int | None = None,
+        output_format: str = "torch",
+        collate_fn: Callable | None = None,
+    ) -> tuple[DataLoader, "IcebergDataset"]: ...
 ```
 
 ---
@@ -188,13 +278,8 @@ class StructuredDataset(IterableDataset):
 
 #### Scenario: Epoch reshuffling
 - GIVEN `shuffle=True`
-- WHEN `__iter__()` is called for epoch 0 and epoch 1
+- WHEN `set_epoch(0)` and `set_epoch(1)` are called
 - THEN the file order differs between epochs
-
-#### Scenario: No shuffle — splits cached
-- GIVEN `shuffle=False`
-- WHEN `__iter__()` is called twice
-- THEN split generation runs only once
 
 #### Scenario: Column projection end-to-end
 - GIVEN `columns=["feature_a", "label"]`
@@ -215,3 +300,46 @@ class StructuredDataset(IterableDataset):
 - GIVEN `num_workers=None`
 - WHEN `create_dataloader()` is called
 - THEN num_workers is set to `max(1, os.cpu_count() - 1)` and logged
+
+#### Scenario: Hive partitioning end-to-end
+- GIVEN a partitioned directory `data/region=us/year=2024/part.parquet`
+- WHEN `create_dataloader(path, format="parquet", partitioning="hive")` is called
+- THEN each batch includes `region="us"` and `year="2024"` columns alongside data columns
+
+#### Scenario: scan_filter prunes files at plan_files() level
+- GIVEN an IcebergDataset with `scan_filter=GreaterThan("region_id", 5)`
+- WHEN `_resolve_files` is called
+- THEN `table.scan(row_filter=GreaterThan("region_id", 5))` is called
+- AND only files that could contain matching rows are returned by `plan_files()`
+- AND splits are generated over the pruned file set only
+
+#### Scenario: scan_filter=None uses full scan
+- GIVEN an IcebergDataset with `scan_filter=None`
+- WHEN `_resolve_files` is called
+- THEN `table.scan(snapshot_id=...)` is called without `row_filter`
+
+#### Scenario: split_bytes triggers sub-file splitting
+- GIVEN a large Parquet file with 10 row groups and `split_bytes="10KiB"`
+- WHEN splits are generated
+- THEN multiple FileSplits with RowRange are produced for the single file
+- AND each RowRange covers a disjoint subset of row groups
+
+#### Scenario: split_rows produces row-count-balanced splits
+- GIVEN multiple Parquet files and `split_rows=5000`
+- WHEN splits are generated
+- THEN each chunk covers at most 5000 rows (aligned to row group boundaries)
+
+#### Scenario: scan_filter auto-derived from filters
+- GIVEN `filters=pc.field("row_id") >= 1875` and `scan_filter=None`
+- WHEN `IcebergDataset` is constructed
+- THEN the system translates `filters` to `GreaterThanOrEqual("row_id", 1875)`
+- AND `_resolve_files` is called with that derived iceberg expression as `scan_filter`
+- AND an INFO log is emitted showing both the pc.Expression and the derived pyiceberg expression
+- AND splits are generated only over the pruned file set
+
+#### Scenario: untranslatable filters falls back to row-level only
+- GIVEN `filters=pc.field("a") >= pc.field("b")` (field vs field — no scalar literal) and `scan_filter=None`
+- WHEN `IcebergDataset` is constructed
+- THEN translation returns None, `_resolve_files` is called without `scan_filter`
+- AND a DEBUG log is emitted explaining the fallback
+- AND all files are scanned; the filter is applied row-level inside workers

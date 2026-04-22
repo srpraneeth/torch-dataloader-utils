@@ -296,3 +296,162 @@ def test_row_range_non_zero_offset(tmp_path):
     assert len(values) == 50
     assert min(values) == 50
     assert max(values) == 99
+
+
+# ---------------------------------------------------------------------------
+# Scenario: _parse_hive_partitions helper
+# ---------------------------------------------------------------------------
+
+def test_parse_hive_partitions_basic():
+    from torch_dataloader_utils.format.reader import _parse_hive_partitions
+    parts = _parse_hive_partitions("/data/region=us/year=2024/part.parquet")
+    assert parts == {"region": "us", "year": "2024"}
+
+
+def test_parse_hive_partitions_no_partitions():
+    from torch_dataloader_utils.format.reader import _parse_hive_partitions
+    parts = _parse_hive_partitions("/data/part.parquet")
+    assert parts == {}
+
+
+def test_parse_hive_partitions_single():
+    from torch_dataloader_utils.format.reader import _parse_hive_partitions
+    parts = _parse_hive_partitions("s3://bucket/dt=2024-01-01/file.parquet")
+    assert parts == {"dt": "2024-01-01"}
+
+
+def test_parse_hive_partitions_values_are_strings():
+    from torch_dataloader_utils.format.reader import _parse_hive_partitions
+    parts = _parse_hive_partitions("/data/year=2024/month=01/file.parquet")
+    assert isinstance(parts["year"], str)
+    assert isinstance(parts["month"], str)
+    assert parts["year"] == "2024"
+    assert parts["month"] == "01"
+
+
+# ---------------------------------------------------------------------------
+# Scenario: Hive partitioning — scanner path (pad.dataset)
+# ---------------------------------------------------------------------------
+
+def test_hive_partitioning_scanner_path(tmp_path):
+    """partitioning="hive" via the scanner path attaches partition columns."""
+    import pyarrow.parquet as pq
+
+    # Build partitioned directory: data/region=us/year=2024/part.parquet
+    partitioned_dir = tmp_path / "region=us" / "year=2024"
+    partitioned_dir.mkdir(parents=True)
+    part_file = partitioned_dir / "part.parquet"
+    pq.write_table(pa.table({"value": pa.array([1, 2, 3], pa.int32())}), part_file)
+
+    shard = _shard_from(str(part_file))
+    batches = list(read_split(shard, format="parquet", partitioning="hive"))
+    assert len(batches) > 0
+    names = set(batches[0].schema.names)
+    assert "value" in names
+    assert "region" in names
+    assert "year" in names
+    # Partition values should be consistent
+    regions = batches[0].column("region").to_pylist()
+    assert all(r == "us" for r in regions)
+
+
+def test_no_partitioning_does_not_inject_columns(tmp_path):
+    """Default partitioning=None must not add extra columns."""
+    import pyarrow.parquet as pq
+
+    partitioned_dir = tmp_path / "region=us"
+    partitioned_dir.mkdir(parents=True)
+    part_file = partitioned_dir / "part.parquet"
+    pq.write_table(pa.table({"value": pa.array([1, 2, 3], pa.int32())}), part_file)
+
+    shard = _shard_from(str(part_file))
+    batches = list(read_split(shard, format="parquet", partitioning=None))
+    assert len(batches) > 0
+    # partitioning=None: region column NOT present
+    assert "region" not in batches[0].schema.names
+
+
+# ---------------------------------------------------------------------------
+# Scenario: Hive partitioning — row-range path
+# ---------------------------------------------------------------------------
+
+def test_hive_partitioning_row_range_path(tmp_path):
+    """Row-range reads parse key=value from path and attach as constant columns."""
+    partitioned_dir = tmp_path / "region=eu" / "year=2023"
+    partitioned_dir.mkdir(parents=True)
+    path = str(partitioned_dir / "part.parquet")
+    _write_multi_rg_parquet(path, num_groups=2, rows_per_group=25)  # 50 rows
+
+    shard = _shard_with_row_range(path, offset=0, length=50)
+    batches = list(read_split(shard, format="parquet", partitioning="hive"))
+    assert len(batches) > 0
+    names = set(batches[0].schema.names)
+    assert "region" in names
+    assert "year" in names
+    regions = batches[0].column("region").to_pylist()
+    assert all(r == "eu" for r in regions)
+    years = batches[0].column("year").to_pylist()
+    assert all(y == "2023" for y in years)
+
+
+def test_hive_partitioning_row_range_no_partitioning(tmp_path):
+    """Row-range with partitioning=None must not inject columns."""
+    partitioned_dir = tmp_path / "region=eu"
+    partitioned_dir.mkdir(parents=True)
+    path = str(partitioned_dir / "part.parquet")
+    _write_multi_rg_parquet(path, num_groups=2, rows_per_group=25)
+
+    shard = _shard_with_row_range(path, offset=0, length=50)
+    batches = list(read_split(shard, format="parquet", partitioning=None))
+    assert len(batches) > 0
+    assert "region" not in batches[0].schema.names
+
+
+# ---------------------------------------------------------------------------
+# Scenario: RowRange with no overlapping row groups → early return (line 160)
+# ---------------------------------------------------------------------------
+
+def test_row_range_beyond_file_yields_nothing(tmp_path):
+    """A RowRange whose offset is past all row groups produces no batches."""
+    path = str(tmp_path / "f.parquet")
+    _write_multi_rg_parquet(path, num_groups=4, rows_per_group=25)  # 100 rows total
+    # offset=500 is well beyond the 100 rows — no row group overlaps
+    shard = _shard_with_row_range(path, offset=500, length=50)
+    batches = list(read_split(shard, format="parquet"))
+    assert batches == []
+
+
+# ---------------------------------------------------------------------------
+# Scenario: _get_arrow_filesystem — non-local path wraps fsspec (lines 206-208)
+# ---------------------------------------------------------------------------
+
+def test_get_arrow_filesystem_remote_returns_py_filesystem():
+    """A non-local path (e.g. s3://) wraps the fsspec fs in pafs.PyFileSystem."""
+    from unittest.mock import MagicMock, patch
+    import pyarrow.fs as pafs
+    from torch_dataloader_utils.format.reader import _get_arrow_filesystem
+
+    mock_fs = MagicMock()
+    mock_fs.protocol = "s3"
+
+    mock_py_fs = MagicMock(spec=pafs.PyFileSystem)
+
+    with patch("torch_dataloader_utils.format.reader.fsspec.url_to_fs",
+               return_value=(mock_fs, "bucket/key.parquet")):
+        with patch("torch_dataloader_utils.format.reader.pafs.FSSpecHandler"):
+            with patch("torch_dataloader_utils.format.reader.pafs.PyFileSystem",
+                       return_value=mock_py_fs):
+                arrow_fs, resolved = _get_arrow_filesystem("s3://bucket/key.parquet", {})
+
+    assert resolved == "bucket/key.parquet"
+    assert arrow_fs is mock_py_fs
+
+
+def test_get_arrow_filesystem_local_returns_none():
+    """A local path returns (None, resolved_path) — no wrapping."""
+    from torch_dataloader_utils.format.reader import _get_arrow_filesystem
+
+    arrow_fs, resolved = _get_arrow_filesystem("/tmp/data.parquet", {})
+    assert arrow_fs is None
+    assert resolved == "/tmp/data.parquet"
+

@@ -55,6 +55,15 @@ The system SHALL accept `storage_options: dict | None`.
 The system SHALL reconstruct the fsspec filesystem via `fsspec.url_to_fs()` at read time.
 The system SHALL pass the fsspec filesystem to `pyarrow.dataset.dataset()`.
 
+### Hive Partitioning `[v1]`
+The system SHALL accept an optional `partitioning: str | None` parameter.
+When `partitioning="hive"` the system SHALL pass `partitioning="hive"` to `pyarrow.dataset.dataset()` so PyArrow decodes directory-encoded partition columns (e.g. `year=2024/month=01/`) and adds them as columns in each returned batch.
+When `partitioning` is `None` (default) no partitioning decoding is applied.
+
+For the row-range read path (`_read_parquet_row_range`), PyArrow's `pq.ParquetFile` does not decode partitioning automatically. The system SHALL parse `key=value` segments from the file path and attach them as constant columns to each yielded batch so the caller gets consistent columns on both read paths.
+
+Partition column values SHALL be returned as strings — the caller is responsible for casting to the desired type.
+
 ### Logging `[v1]`
 The system SHALL log at `DEBUG` level: file path being read and format.
 The system SHALL log at `DEBUG` level: number of batches yielded per file.
@@ -71,6 +80,7 @@ def read_split(
     columns: list[str] | None = None,
     filters: pc.Expression | None = None,
     storage_options: dict | None = None,
+    partitioning: str | None = None,
 ) -> Iterator[pa.RecordBatch]:
     ...
 ```
@@ -128,3 +138,18 @@ def read_split(
 - GIVEN a Split with no FileSplits
 - WHEN `read_split` is called
 - THEN no RecordBatches are yielded — no error raised
+
+#### Scenario: Hive partitioning — scanner path
+- GIVEN a directory with structure `data/region=us/year=2024/part.parquet`
+- WHEN `read_split(split, format="parquet", partitioning="hive")` is called
+- THEN each batch includes `region` and `year` columns with values `"us"` and `"2024"`
+
+#### Scenario: Hive partitioning — row-range path
+- GIVEN a large Parquet file at `data/region=eu/part.parquet` read via row-range sub-split
+- WHEN `read_split(split, format="parquet", partitioning="hive")` is called
+- THEN each batch includes a `region` column with value `"eu"`
+
+#### Scenario: No partitioning (default)
+- GIVEN `partitioning=None`
+- WHEN `read_split` is called
+- THEN partition columns are NOT injected into the output batches
