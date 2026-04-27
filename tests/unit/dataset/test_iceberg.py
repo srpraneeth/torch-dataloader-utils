@@ -1,8 +1,8 @@
 """Unit tests for IcebergDataset — no pyiceberg required (mocked)."""
+
 import os
 import sys
 import tempfile
-from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
@@ -12,10 +12,10 @@ import pytest
 
 from torch_dataloader_utils.splits.core import IcebergDataFileInfo
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_info(path: str, file_size: int = 1024, record_count: int = 100) -> IcebergDataFileInfo:
     return IcebergDataFileInfo(
@@ -31,13 +31,17 @@ def _write_parquet(tmpdir: str, rows: list[int]) -> IcebergDataFileInfo:
     path = os.path.join(tmpdir, "a.parquet")
     pq.write_table(pa.table({"x": pa.array(rows, pa.int32())}), path)
     return IcebergDataFileInfo(
-        path=path, file_size=os.path.getsize(path), record_count=len(rows), snapshot_id=1,
+        path=path,
+        file_size=os.path.getsize(path),
+        record_count=len(rows),
+        snapshot_id=1,
     )
 
 
 # ---------------------------------------------------------------------------
 # _require_pyiceberg
 # ---------------------------------------------------------------------------
+
 
 class TestRequirePyiceberg:
     def test_raises_import_error_when_missing(self):
@@ -60,17 +64,20 @@ class TestRequirePyiceberg:
 # _try_to_iceberg
 # ---------------------------------------------------------------------------
 
+
 class TestTryToIceberg:
     """Tests for the pc.Expression → pyiceberg BooleanExpression translator."""
 
     def _t(self, expr):
         from torch_dataloader_utils.dataset.iceberg import _try_to_iceberg
+
         return _try_to_iceberg(expr)
 
     # --- comparison operators with integer literals ---
 
     def test_gte_integer(self):
         from pyiceberg.expressions import GreaterThanOrEqual
+
         r = self._t(pc.field("row_id") >= 1875)
         assert isinstance(r, GreaterThanOrEqual)
         assert r.term.name == "row_id"
@@ -78,38 +85,45 @@ class TestTryToIceberg:
 
     def test_gt_integer(self):
         from pyiceberg.expressions import GreaterThan
+
         r = self._t(pc.field("score") > 0)
         assert isinstance(r, GreaterThan)
         assert r.term.name == "score"
 
     def test_lte_integer(self):
         from pyiceberg.expressions import LessThanOrEqual
+
         assert isinstance(self._t(pc.field("count") <= 100), LessThanOrEqual)
 
     def test_lt_integer(self):
         from pyiceberg.expressions import LessThan
+
         assert isinstance(self._t(pc.field("count") < 50), LessThan)
 
     def test_eq_integer(self):
         from pyiceberg.expressions import EqualTo
+
         r = self._t(pc.field("label") == 1)
         assert isinstance(r, EqualTo)
         assert r.literal.value == 1
 
     def test_ne_integer(self):
         from pyiceberg.expressions import NotEqualTo
+
         assert isinstance(self._t(pc.field("label") != 0), NotEqualTo)
 
     # --- other literal types ---
 
     def test_eq_string(self):
         from pyiceberg.expressions import EqualTo
+
         r = self._t(pc.field("region") == "us")
         assert isinstance(r, EqualTo)
         assert r.literal.value == "us"
 
     def test_gt_float(self):
         from pyiceberg.expressions import GreaterThan
+
         r = self._t(pc.field("score") > 0.5)
         assert isinstance(r, GreaterThan)
         assert abs(r.literal.value - 0.5) < 1e-9
@@ -118,11 +132,13 @@ class TestTryToIceberg:
 
     def test_and_combination(self):
         from pyiceberg.expressions import And
+
         r = self._t((pc.field("row_id") >= 100) & (pc.field("label") == 1))
         assert isinstance(r, And)
 
     def test_or_combination(self):
         from pyiceberg.expressions import Or
+
         r = self._t((pc.field("region") == "us") | (pc.field("region") == "eu"))
         assert isinstance(r, Or)
 
@@ -136,6 +152,7 @@ class TestTryToIceberg:
     def test_returns_none_when_pyiceberg_not_installed(self):
         """Returns None gracefully when pyiceberg.expressions is absent."""
         from torch_dataloader_utils.dataset.iceberg import _try_to_iceberg
+
         with patch.dict(sys.modules, {"pyiceberg.expressions": None}):
             r = _try_to_iceberg(pc.field("x") >= 1)
         assert r is None
@@ -144,6 +161,7 @@ class TestTryToIceberg:
 # ---------------------------------------------------------------------------
 # _detect_format
 # ---------------------------------------------------------------------------
+
 
 class TestDetectFormat:
     def test_parquet_files(self):
@@ -188,6 +206,7 @@ class TestDetectFormat:
 # IcebergDataset.__init__ — file-not-found path
 # ---------------------------------------------------------------------------
 
+
 class TestIcebergDatasetInit:
     def _make_pyiceberg_mock(self, files: list[IcebergDataFileInfo]):
         """Build a minimal pyiceberg module + catalog mock that returns `files`."""
@@ -220,11 +239,15 @@ class TestIcebergDatasetInit:
         pyiceberg_catalog_mod.load_catalog = fake_load_catalog
         pyiceberg_expressions_mod = MagicMock()
 
-        return {
-            "pyiceberg": pyiceberg_mod,
-            "pyiceberg.catalog": pyiceberg_catalog_mod,
-            "pyiceberg.expressions": pyiceberg_expressions_mod,
-        }, fake_catalog, fake_table
+        return (
+            {
+                "pyiceberg": pyiceberg_mod,
+                "pyiceberg.catalog": pyiceberg_catalog_mod,
+                "pyiceberg.expressions": pyiceberg_expressions_mod,
+            },
+            fake_catalog,
+            fake_table,
+        )
 
     def test_empty_table_raises_file_not_found(self):
         """No data files → FileNotFoundError with table name in message."""
@@ -248,7 +271,9 @@ class TestIcebergDatasetInit:
         with patch.dict(sys.modules, {"pyiceberg": None}):
             # Re-import to get fresh module
             import importlib
+
             import torch_dataloader_utils.dataset.iceberg as iceberg_mod
+
             importlib.reload(iceberg_mod)
 
             with pytest.raises(ImportError, match="pip install torch-dataloader-utils"):
@@ -259,24 +284,27 @@ class TestIcebergDatasetInit:
 
     def test_set_epoch_delegates_to_inner_dataset(self):
         """set_epoch() regenerates splits on the dataset."""
-        import tempfile, os
+        import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "a.parquet")
             table = pa.table({"x": pa.array([1, 2, 3], pa.int32())})
             import pyarrow.parquet as pq
+
             pq.write_table(table, path)
 
-            real_files = [IcebergDataFileInfo(
-                path=path,
-                file_size=os.path.getsize(path),
-                record_count=3,
-                snapshot_id=1,
-            )]
+            real_files = [
+                IcebergDataFileInfo(
+                    path=path,
+                    file_size=os.path.getsize(path),
+                    record_count=3,
+                    snapshot_id=1,
+                )
+            ]
             fake_task = MagicMock()
             fake_task.file.file_path = path
             fake_task.delete_files = set()
-            fake_iceberg_table = MagicMock()
 
             with patch(
                 "torch_dataloader_utils.dataset.iceberg._resolve_files",
@@ -290,27 +318,30 @@ class TestIcebergDatasetInit:
                         catalog_config={"type": "rest"},
                         num_workers=1,
                     )
-                    splits_before = ds._splits
                     ds.set_epoch(3)
                     # set_epoch regenerates splits — object identity changes
                     assert ds._epoch == 3
 
     def test_iter_delegates_to_inner_dataset(self):
         """__iter__ (fast path, no deletes) yields batches without error."""
-        import tempfile, os
+        import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "a.parquet")
             table = pa.table({"x": pa.array([1, 2, 3], pa.int32())})
             import pyarrow.parquet as pq
+
             pq.write_table(table, path)
 
-            real_files = [IcebergDataFileInfo(
-                path=path,
-                file_size=os.path.getsize(path),
-                record_count=3,
-                snapshot_id=1,
-            )]
+            real_files = [
+                IcebergDataFileInfo(
+                    path=path,
+                    file_size=os.path.getsize(path),
+                    record_count=3,
+                    snapshot_id=1,
+                )
+            ]
 
             with patch(
                 "torch_dataloader_utils.dataset.iceberg._resolve_files",
@@ -331,22 +362,29 @@ class TestIcebergDatasetInit:
 
     def test_worker_beyond_split_count_yields_nothing(self):
         """worker_id >= len(splits) → early return, no batches."""
-        import tempfile, os
+        import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "a.parquet")
             pq.write_table(pa.table({"x": pa.array([1, 2, 3], pa.int32())}), path)
-            real_files = [IcebergDataFileInfo(
-                path=path, file_size=os.path.getsize(path), record_count=3, snapshot_id=1,
-            )]
+            real_files = [
+                IcebergDataFileInfo(
+                    path=path,
+                    file_size=os.path.getsize(path),
+                    record_count=3,
+                    snapshot_id=1,
+                )
+            ]
 
             with patch(
                 "torch_dataloader_utils.dataset.iceberg._resolve_files",
                 return_value=(real_files, False, {}),
             ):
                 with patch("torch_dataloader_utils.dataset.iceberg._require_pyiceberg"):
-                    from torch_dataloader_utils.dataset.iceberg import IcebergDataset
                     from unittest.mock import MagicMock
+
+                    from torch_dataloader_utils.dataset.iceberg import IcebergDataset
 
                     ds = IcebergDataset(
                         table="db.table",
@@ -363,6 +401,7 @@ class TestIcebergDatasetInit:
 # ---------------------------------------------------------------------------
 # _auto_select_strategy
 # ---------------------------------------------------------------------------
+
 
 class TestAutoSelectStrategy:
     def test_non_empty_files_returns_target_size(self):
@@ -405,16 +444,23 @@ class TestAutoSelectStrategy:
 # scan_filter auto-derivation
 # ---------------------------------------------------------------------------
 
+
 class TestAutoDeriveScanFilter:
     """Tests for the automatic scan_filter derivation from pc.Expression filters."""
 
     def _make_files(self, tmpdir):
         import os
+
         path = os.path.join(tmpdir, "a.parquet")
         pq.write_table(pa.table({"x": pa.array([1, 2, 3], pa.int32())}), path)
-        return [IcebergDataFileInfo(
-            path=path, file_size=os.path.getsize(path), record_count=3, snapshot_id=1,
-        )]
+        return [
+            IcebergDataFileInfo(
+                path=path,
+                file_size=os.path.getsize(path),
+                record_count=3,
+                snapshot_id=1,
+            )
+        ]
 
     def test_translatable_filters_derives_scan_filter(self):
         """When filters translates successfully, the derived iceberg expr reaches _resolve_files."""
@@ -513,6 +559,7 @@ class TestAutoDeriveScanFilter:
 # Output format validation — raised before _resolve_files is called
 # ---------------------------------------------------------------------------
 
+
 class TestOutputFormatValidation:
     def test_invalid_output_format_raises(self):
         from torch_dataloader_utils.dataset.iceberg import IcebergDataset
@@ -553,6 +600,7 @@ class TestOutputFormatValidation:
 # ---------------------------------------------------------------------------
 # _read_task_with_deletes — mocked pyiceberg submodules
 # ---------------------------------------------------------------------------
+
 
 class TestReadTaskWithDeletes:
     _PATH = "s3://bucket/data.parquet"
@@ -602,15 +650,17 @@ class TestReadTaskWithDeletes:
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _read_task_with_deletes
 
-            results = list(_read_task_with_deletes(
-                data_file_path=self._PATH,
-                table_identifier="db.table",
-                catalog_config={"name": "test"},
-                snapshot_id=None,
-                columns=None,
-                filters=None,
-                batch_size=3,
-            ))
+            results = list(
+                _read_task_with_deletes(
+                    data_file_path=self._PATH,
+                    table_identifier="db.table",
+                    catalog_config={"name": "test"},
+                    snapshot_id=None,
+                    columns=None,
+                    filters=None,
+                    batch_size=3,
+                )
+            )
 
         assert len(results) == 2
         assert len(results[0]) == 3
@@ -624,15 +674,17 @@ class TestReadTaskWithDeletes:
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _read_task_with_deletes
 
-            results = list(_read_task_with_deletes(
-                data_file_path=self._PATH,
-                table_identifier="db.table",
-                catalog_config={"name": "test"},
-                snapshot_id=None,
-                columns=None,
-                filters=None,
-                batch_size=100,
-            ))
+            results = list(
+                _read_task_with_deletes(
+                    data_file_path=self._PATH,
+                    table_identifier="db.table",
+                    catalog_config={"name": "test"},
+                    snapshot_id=None,
+                    columns=None,
+                    filters=None,
+                    batch_size=100,
+                )
+            )
 
         assert results == []
 
@@ -644,15 +696,17 @@ class TestReadTaskWithDeletes:
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _read_task_with_deletes
 
-            results = list(_read_task_with_deletes(
-                data_file_path=self._PATH,
-                table_identifier="db.table",
-                catalog_config={"name": "test"},
-                snapshot_id=None,
-                columns=None,
-                filters=pc.field("x") > 3,
-                batch_size=100,
-            ))
+            results = list(
+                _read_task_with_deletes(
+                    data_file_path=self._PATH,
+                    table_identifier="db.table",
+                    catalog_config={"name": "test"},
+                    snapshot_id=None,
+                    columns=None,
+                    filters=pc.field("x") > 3,
+                    batch_size=100,
+                )
+            )
 
         assert len(results) == 1
         assert results[0]["x"].to_pylist() == [4, 5]
@@ -665,38 +719,44 @@ class TestReadTaskWithDeletes:
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _read_task_with_deletes
 
-            results = list(_read_task_with_deletes(
-                data_file_path=self._PATH,
-                table_identifier="db.table",
-                catalog_config={"name": "test"},
-                snapshot_id=None,
-                columns=None,
-                filters=pc.field("x") > 100,
-                batch_size=100,
-            ))
+            results = list(
+                _read_task_with_deletes(
+                    data_file_path=self._PATH,
+                    table_identifier="db.table",
+                    catalog_config={"name": "test"},
+                    snapshot_id=None,
+                    columns=None,
+                    filters=pc.field("x") > 100,
+                    batch_size=100,
+                )
+            )
 
         assert results == []
 
     def test_columns_selection_calls_schema_select(self):
         """When columns is given, projected_schema.select(columns) is called."""
-        batch = pa.record_batch({
-            "x": pa.array([1, 2], pa.int32()),
-            "y": pa.array([3, 4], pa.int32()),
-        })
+        batch = pa.record_batch(
+            {
+                "x": pa.array([1, 2], pa.int32()),
+                "y": pa.array([3, 4], pa.int32()),
+            }
+        )
         mods, mock_table = self._build_mocks(batch)
 
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _read_task_with_deletes
 
-            list(_read_task_with_deletes(
-                data_file_path=self._PATH,
-                table_identifier="db.table",
-                catalog_config={"name": "test"},
-                snapshot_id=None,
-                columns=["x"],
-                filters=None,
-                batch_size=100,
-            ))
+            list(
+                _read_task_with_deletes(
+                    data_file_path=self._PATH,
+                    table_identifier="db.table",
+                    catalog_config={"name": "test"},
+                    snapshot_id=None,
+                    columns=["x"],
+                    filters=None,
+                    batch_size=100,
+                )
+            )
 
         mock_table.schema.return_value.select.assert_called_once_with(["x"])
 
@@ -708,15 +768,17 @@ class TestReadTaskWithDeletes:
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _read_task_with_deletes
 
-            list(_read_task_with_deletes(
-                data_file_path=self._PATH,
-                table_identifier="namespace.db.tbl",   # 3 parts
-                catalog_config={"name": "test"},
-                snapshot_id=None,
-                columns=None,
-                filters=None,
-                batch_size=100,
-            ))
+            list(
+                _read_task_with_deletes(
+                    data_file_path=self._PATH,
+                    table_identifier="namespace.db.tbl",  # 3 parts
+                    catalog_config={"name": "test"},
+                    snapshot_id=None,
+                    columns=None,
+                    filters=None,
+                    batch_size=100,
+                )
+            )
 
         mock_catalog = mods["pyiceberg.catalog"].load_catalog.return_value
         mock_catalog.load_table.assert_called_once_with("db.tbl")
@@ -725,6 +787,7 @@ class TestReadTaskWithDeletes:
 # ---------------------------------------------------------------------------
 # __iter__ delete path
 # ---------------------------------------------------------------------------
+
 
 class TestIterWithDeletePath:
     def _make_dataset(self, tmpdir, has_deletes=True):
@@ -781,6 +844,7 @@ class TestIterWithDeletePath:
 # create_dataloader (unit)
 # ---------------------------------------------------------------------------
 
+
 class TestCreateDataloaderUnit:
     def _patch_resolve(self, tmpdir):
         info = _write_parquet(tmpdir, [1, 2, 3])
@@ -807,7 +871,6 @@ class TestCreateDataloaderUnit:
         assert isinstance(ds, IcebergDataset)
 
     def test_num_workers_none_auto_detected(self):
-        from torch.utils.data import DataLoader
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with self._patch_resolve(tmpdir):
@@ -861,12 +924,16 @@ class TestCreateDataloaderUnit:
                     )
 
         _, call_kwargs = mock_resolve.call_args
-        assert call_kwargs.get("scan_filter") is mock_filter or mock_resolve.call_args[0][3] is mock_filter
+        assert (
+            call_kwargs.get("scan_filter") is mock_filter
+            or mock_resolve.call_args[0][3] is mock_filter
+        )
 
 
 # ---------------------------------------------------------------------------
 # _resolve_files — exercises lines 65-124 via mocked pyiceberg.catalog
 # ---------------------------------------------------------------------------
+
 
 class TestResolveFiles:
     """Execute _resolve_files with a mocked pyiceberg.catalog to cover lines 65-124."""
@@ -918,6 +985,7 @@ class TestResolveFiles:
 
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _resolve_files
+
             files, has_deletes, delete_paths = _resolve_files("db.tbl", {"name": "test"}, None)
 
         assert len(files) == 2
@@ -931,6 +999,7 @@ class TestResolveFiles:
 
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _resolve_files
+
             files, _, _ = _resolve_files("db.tbl", {"name": "test"}, None)
 
         assert files[0].file_size == 2048
@@ -945,6 +1014,7 @@ class TestResolveFiles:
 
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _resolve_files
+
             files, _, _ = _resolve_files("db.tbl", {"name": "test"}, None)
 
         assert files[0].partition == {"dt": "2024-01-01"}
@@ -956,6 +1026,7 @@ class TestResolveFiles:
 
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _resolve_files
+
             files, _, _ = _resolve_files("db.tbl", {"name": "test"}, None)
 
         assert files[0].partition is None
@@ -963,12 +1034,11 @@ class TestResolveFiles:
     # --- delete file detection ---
 
     def test_has_deletes_true_when_delete_files_present(self):
-        mods, _, _ = self._build_pyiceberg_catalog_mock(
-            ["s3://bucket/a.parquet"], has_deletes=True
-        )
+        mods, _, _ = self._build_pyiceberg_catalog_mock(["s3://bucket/a.parquet"], has_deletes=True)
 
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _resolve_files
+
             files, has_deletes, delete_paths = _resolve_files("db.tbl", {"name": "test"}, None)
 
         assert has_deletes is True
@@ -982,6 +1052,7 @@ class TestResolveFiles:
 
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _resolve_files
+
             files, has_deletes, delete_paths = _resolve_files("db.tbl", {"name": "test"}, None)
 
         assert has_deletes is False
@@ -996,6 +1067,7 @@ class TestResolveFiles:
 
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _resolve_files
+
             files, _, _ = _resolve_files("db.tbl", {"name": "test"}, snapshot_id=None)
 
         fake_table.current_snapshot.assert_called()
@@ -1008,6 +1080,7 @@ class TestResolveFiles:
 
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _resolve_files
+
             files, _, _ = _resolve_files("db.tbl", {"name": "test"}, snapshot_id=99)
 
         # When snapshot_id is provided it's passed directly to scan
@@ -1022,6 +1095,7 @@ class TestResolveFiles:
 
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _resolve_files
+
             _resolve_files("db.tbl", {"name": "test"}, None)
 
         fake_catalog.load_table.assert_called_once_with("db.tbl")
@@ -1031,6 +1105,7 @@ class TestResolveFiles:
 
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _resolve_files
+
             _resolve_files("namespace.db.tbl", {"name": "test"}, None)
 
         fake_catalog.load_table.assert_called_once_with("db.tbl")
@@ -1043,6 +1118,7 @@ class TestResolveFiles:
 
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _resolve_files
+
             _resolve_files("db.tbl", cfg, None)
 
         mods["pyiceberg.catalog"].load_catalog.assert_called_once_with(**cfg)
@@ -1056,6 +1132,7 @@ class TestResolveFiles:
 
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _resolve_files
+
             _resolve_files("db.tbl", {"name": "test"}, None, scan_filter=mock_filter)
 
         fake_table.scan.assert_called_with(snapshot_id=None, row_filter=mock_filter)
@@ -1066,6 +1143,7 @@ class TestResolveFiles:
 
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _resolve_files
+
             _resolve_files("db.tbl", {"name": "test"}, None, scan_filter=None)
 
         fake_table.scan.assert_called_with(snapshot_id=None)
@@ -1079,6 +1157,7 @@ class TestResolveFiles:
 
         with patch.dict(sys.modules, mods):
             from torch_dataloader_utils.dataset.iceberg import _resolve_files
+
             _resolve_files("db.tbl", {"name": "test"}, snapshot_id=55, scan_filter=mock_filter)
 
         fake_table.scan.assert_called_with(snapshot_id=55, row_filter=mock_filter)

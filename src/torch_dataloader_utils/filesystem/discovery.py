@@ -1,5 +1,4 @@
 import logging
-from fnmatch import fnmatch
 
 import fsspec
 
@@ -19,7 +18,7 @@ _BACKEND_INSTALL = {
 
 def _install_hint(path: str) -> str:
     scheme = path.split("://")[0] if "://" in path else "file"
-    return _BACKEND_INSTALL.get(scheme, f"pip install torch-dataloader-utils")
+    return _BACKEND_INSTALL.get(scheme, "pip install torch-dataloader-utils")
 
 
 def _raise_clean_fs_error(exc: Exception, path: str) -> None:
@@ -30,12 +29,33 @@ def _raise_clean_fs_error(exc: Exception, path: str) -> None:
     """
     msg = str(exc).lower()
 
-    credential_keywords = ("credential", "no credentials", "accessdenied", "autherror",
-                           "authenticationerror", "could not connect", "no auth", "unauthorized")
-    forbidden_keywords = ("403", "forbidden", "permission denied", "access denied",
-                          "accessforbidden", "not authorized")
-    notfound_keywords = ("404", "not found", "nosuchbucket", "nosuchkey", "no such file",
-                         "does not exist", "entitynotfound")
+    credential_keywords = (
+        "credential",
+        "no credentials",
+        "accessdenied",
+        "autherror",
+        "authenticationerror",
+        "could not connect",
+        "no auth",
+        "unauthorized",
+    )
+    forbidden_keywords = (
+        "403",
+        "forbidden",
+        "permission denied",
+        "access denied",
+        "accessforbidden",
+        "not authorized",
+    )
+    notfound_keywords = (
+        "404",
+        "not found",
+        "nosuchbucket",
+        "nosuchkey",
+        "no such file",
+        "does not exist",
+        "entitynotfound",
+    )
     timeout_keywords = ("timeout", "timed out", "connection timed out")
     ssl_keywords = ("ssl", "certificate", "tls", "handshake")
 
@@ -157,4 +177,3 @@ def discover_files(
         sum(f.file_size for f in files if f.file_size is not None) or "unknown",
     )
     return files
-

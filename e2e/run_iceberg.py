@@ -17,11 +17,11 @@ Usage:
     uv run python e2e/run_iceberg.py --num-files 6 --rows 5000 --num-workers 4
     uv run python e2e/run_iceberg.py --no-shuffle
 """
+
 import argparse
 import os
 import sys
 import tempfile
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
@@ -30,36 +30,39 @@ import pyarrow.compute as pc
 try:
     from pyiceberg.catalog.sql import SqlCatalog
     from pyiceberg.schema import Schema
-    from pyiceberg.types import FloatType, IntegerType, NestedField, StringType
+    from pyiceberg.types import FloatType, IntegerType, NestedField
 except ImportError:
     print("ERROR: pyiceberg not installed. Run: pip install torch-dataloader-utils[iceberg]")
     sys.exit(1)
 
 import torch
-from torch_dataloader_utils.dataset.iceberg import IcebergDataset
 
+from torch_dataloader_utils.dataset.iceberg import IcebergDataset
 
 # ---------------------------------------------------------------------------
 # Data generation
 # ---------------------------------------------------------------------------
 
+
 def _iceberg_schema() -> Schema:
     return Schema(
-        NestedField(1, "row_id",    IntegerType(), required=False),
-        NestedField(2, "feature_a", FloatType(),   required=False),
+        NestedField(1, "row_id", IntegerType(), required=False),
+        NestedField(2, "feature_a", FloatType(), required=False),
         NestedField(3, "feature_b", IntegerType(), required=False),
-        NestedField(4, "label",     IntegerType(), required=False),
+        NestedField(4, "label", IntegerType(), required=False),
     )
 
 
 def _make_arrow_batch(n_rows: int, offset: int) -> pa.Table:
     row_ids = list(range(offset, offset + n_rows))
-    return pa.table({
-        "row_id":    pa.array(row_ids,                                  type=pa.int32()),
-        "feature_a": pa.array([float(i % 10) / 10.0 for i in row_ids], type=pa.float32()),
-        "feature_b": pa.array([i % 100 for i in row_ids],              type=pa.int32()),
-        "label":     pa.array([i % 2 for i in row_ids],                type=pa.int32()),
-    })
+    return pa.table(
+        {
+            "row_id": pa.array(row_ids, type=pa.int32()),
+            "feature_a": pa.array([float(i % 10) / 10.0 for i in row_ids], type=pa.float32()),
+            "feature_b": pa.array([i % 100 for i in row_ids], type=pa.int32()),
+            "label": pa.array([i % 2 for i in row_ids], type=pa.int32()),
+        }
+    )
 
 
 def setup_catalog(warehouse_dir: str, db_path: str) -> tuple[SqlCatalog, dict]:
@@ -94,6 +97,7 @@ def create_table(catalog: SqlCatalog, num_files: int, rows_per_file: int) -> int
 # Collectors
 # ---------------------------------------------------------------------------
 
+
 def collect(it) -> dict[str, list]:
     result: dict[str, list] = {}
     for batch in it:
@@ -111,6 +115,7 @@ def collect(it) -> dict[str, list]:
 # ---------------------------------------------------------------------------
 # Individual scenario checks
 # ---------------------------------------------------------------------------
+
 
 def check(name: str, condition: bool, detail: str = "") -> bool:
     status = "✓" if condition else "✗ FAIL"
@@ -131,8 +136,9 @@ def run_basic_read(catalog_config: dict, total_rows: int, batch_size: int) -> bo
     )
     rows = collect(loader)
     row_ids = sorted(rows.get("row_id", []))
-    ok_count = check("row count", len(row_ids) == total_rows,
-                     f"got {len(row_ids)}, expected {total_rows}")
+    ok_count = check(
+        "row count", len(row_ids) == total_rows, f"got {len(row_ids)}, expected {total_rows}"
+    )
     ok_dedup = check("no duplicates", len(row_ids) == len(set(row_ids)))
     ok_range = check("no gaps", row_ids == list(range(total_rows)))
     return ok_count and ok_dedup and ok_range
@@ -165,9 +171,11 @@ def run_predicate_filter(catalog_config: dict, total_rows: int) -> bool:
     ok_values = check("all returned rows satisfy filter", all(v >= 50 for v in feature_b))
     # Each group of 100 rows has 50 values with feature_b >= 50
     expected = total_rows // 2
-    ok_count = check("filtered row count correct",
-                     len(feature_b) == expected,
-                     f"got {len(feature_b)}, expected {expected}")
+    ok_count = check(
+        "filtered row count correct",
+        len(feature_b) == expected,
+        f"got {len(feature_b)}, expected {expected}",
+    )
     return ok_values and ok_count
 
 
@@ -224,9 +232,11 @@ def run_multi_epoch_shuffle(catalog_config: dict) -> bool:
         orders.append([sp.file.path for sp in dataset._splits[0].splits])
 
     distinct = len(set(tuple(o) for o in orders))
-    ok = check("shuffle produces varied orders across epochs",
-               distinct > 1,
-               f"{distinct} distinct orders across 6 epochs")
+    ok = check(
+        "shuffle produces varied orders across epochs",
+        distinct > 1,
+        f"{distinct} distinct orders across 6 epochs",
+    )
     return ok
 
 
@@ -246,9 +256,11 @@ def run_multi_worker(catalog_config: dict, num_workers: int, total_rows: int) ->
             for batch in dataset:
                 all_row_ids.extend(batch["row_id"].tolist())
 
-    ok_count = check("total rows correct",
-                     len(all_row_ids) == total_rows,
-                     f"got {len(all_row_ids)}, expected {total_rows}")
+    ok_count = check(
+        "total rows correct",
+        len(all_row_ids) == total_rows,
+        f"got {len(all_row_ids)}, expected {total_rows}",
+    )
     ok_dedup = check("no duplicates", len(all_row_ids) == len(set(all_row_ids)))
     return ok_count and ok_dedup
 
@@ -270,8 +282,10 @@ def run_snapshot_time_travel(catalog: SqlCatalog, catalog_config: dict) -> bool:
         snapshot_id=snap1_id,
     )
     rows = collect(loader)
-    ok = check("snapshot 1 returns only first 100 rows",
-               len(rows["row_id"]) == 100 and all(v < 100 for v in rows["row_id"]))
+    ok = check(
+        "snapshot 1 returns only first 100 rows",
+        len(rows["row_id"]) == 100 and all(v < 100 for v in rows["row_id"]),
+    )
     return ok
 
 
@@ -279,26 +293,27 @@ def run_snapshot_time_travel(catalog: SqlCatalog, catalog_config: dict) -> bool:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-files",   type=int, default=4,    help="Iceberg data files")
-    parser.add_argument("--rows",        type=int, default=1000, help="Rows per file")
-    parser.add_argument("--batch-size",  type=int, default=256)
+    parser.add_argument("--num-files", type=int, default=4, help="Iceberg data files")
+    parser.add_argument("--rows", type=int, default=1000, help="Rows per file")
+    parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--shuffle",     action="store_true", default=True)
-    parser.add_argument("--no-shuffle",  dest="shuffle", action="store_false")
+    parser.add_argument("--shuffle", action="store_true", default=True)
+    parser.add_argument("--no-shuffle", dest="shuffle", action="store_false")
     args = parser.parse_args()
 
     total_rows = args.num_files * args.rows
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("  Iceberg E2E Pipeline Test")
     print(f"  files      : {args.num_files}")
     print(f"  rows/file  : {args.rows:,}")
     print(f"  total rows : {total_rows:,}")
     print(f"  num_workers: {args.num_workers}")
     print(f"  shuffle    : {args.shuffle}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         warehouse = os.path.join(tmpdir, "warehouse")
@@ -308,7 +323,9 @@ def main() -> int:
         print("\nSetting up catalog and table...")
         catalog, catalog_config = setup_catalog(warehouse, db_path)
         create_table(catalog, args.num_files, args.rows)
-        print(f"  Created table e2e.test_table with {total_rows:,} rows across {args.num_files} files")
+        print(
+            f"  Created table e2e.test_table with {total_rows:,} rows across {args.num_files} files"
+        )
 
         results = []
         results.append(run_basic_read(catalog_config, total_rows, args.batch_size))
@@ -319,13 +336,13 @@ def main() -> int:
         results.append(run_multi_worker(catalog_config, args.num_workers, total_rows))
         results.append(run_snapshot_time_travel(catalog, catalog_config))
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     passed = sum(results)
     total = len(results)
     all_ok = all(results)
     print(f"  Results: {passed}/{total} scenarios passed")
     print(f"  Overall: {'✓ ALL PASSED' if all_ok else '✗ FAILURES DETECTED'}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     return 0 if all_ok else 1
 

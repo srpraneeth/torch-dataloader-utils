@@ -1,14 +1,15 @@
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from torch_dataloader_utils.filesystem.discovery import discover_files
 from torch_dataloader_utils.splits.core import DataFileInfo
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _write_files(directory: Path, names: list[str]) -> list[Path]:
     paths = []
@@ -22,6 +23,7 @@ def _write_files(directory: Path, names: list[str]) -> list[Path]:
 # ---------------------------------------------------------------------------
 # Scenario: Directory discovery
 # ---------------------------------------------------------------------------
+
 
 def test_directory_returns_all_files(tmp_path):
     _write_files(tmp_path, ["a.parquet", "b.parquet", "c.parquet", "d.parquet", "e.parquet"])
@@ -42,6 +44,7 @@ def test_directory_file_size_populated(tmp_path):
 # Scenario: Glob pattern
 # ---------------------------------------------------------------------------
 
+
 def test_glob_returns_matching_files(tmp_path):
     _write_files(tmp_path, ["a.parquet", "b.parquet", "c.parquet"])
     _write_files(tmp_path, ["x.csv", "y.csv"])
@@ -53,6 +56,7 @@ def test_glob_returns_matching_files(tmp_path):
 # ---------------------------------------------------------------------------
 # Scenario: Single file
 # ---------------------------------------------------------------------------
+
 
 def test_single_file_returns_one(tmp_path):
     p = tmp_path / "f1.parquet"
@@ -66,6 +70,7 @@ def test_single_file_returns_one(tmp_path):
 # Scenario: Empty directory
 # ---------------------------------------------------------------------------
 
+
 def test_empty_directory_returns_empty_list(tmp_path):
     result = discover_files(str(tmp_path))
     assert result == []
@@ -74,6 +79,7 @@ def test_empty_directory_returns_empty_list(tmp_path):
 # ---------------------------------------------------------------------------
 # Scenario: Path does not exist
 # ---------------------------------------------------------------------------
+
 
 def test_nonexistent_path_raises_file_not_found(tmp_path):
     missing = str(tmp_path / "does_not_exist")
@@ -84,6 +90,7 @@ def test_nonexistent_path_raises_file_not_found(tmp_path):
 # ---------------------------------------------------------------------------
 # Scenario: Extension filtering
 # ---------------------------------------------------------------------------
+
 
 def test_extension_filter_includes_only_matching(tmp_path):
     _write_files(tmp_path, ["a.parquet", "b.parquet", "c.parquet"])
@@ -109,6 +116,7 @@ def test_extension_filter_no_matches_returns_empty(tmp_path):
 # Scenario: Missing optional backend
 # ---------------------------------------------------------------------------
 
+
 def test_missing_backend_raises_import_error_with_hint():
     with patch("fsspec.url_to_fs", side_effect=ImportError("No module named 's3fs'")):
         with pytest.raises(ImportError, match="pip install torch-dataloader-utils\\[s3\\]"):
@@ -131,6 +139,7 @@ def test_missing_azure_backend_raises_import_error_with_hint():
 # Scenario: storage_options passed through
 # ---------------------------------------------------------------------------
 
+
 def test_storage_options_passed_to_fsspec(tmp_path):
     _write_files(tmp_path, ["a.parquet"])
     # Should not raise — storage_options={} is valid for local
@@ -142,6 +151,7 @@ def test_storage_options_passed_to_fsspec(tmp_path):
 # Scenario: DataFileInfo paths are strings
 # ---------------------------------------------------------------------------
 
+
 def test_returned_paths_are_strings(tmp_path):
     _write_files(tmp_path, ["a.parquet", "b.parquet"])
     result = discover_files(str(tmp_path))
@@ -152,38 +162,46 @@ def test_returned_paths_are_strings(tmp_path):
 # Scenario: _install_hint — correct package suggested per scheme
 # ---------------------------------------------------------------------------
 
+
 def test_install_hint_s3():
     from torch_dataloader_utils.filesystem.discovery import _install_hint
+
     assert "[s3]" in _install_hint("s3://bucket/data/")
 
 
 def test_install_hint_s3a():
     from torch_dataloader_utils.filesystem.discovery import _install_hint
+
     assert "[s3]" in _install_hint("s3a://bucket/data/")
 
 
 def test_install_hint_gs():
     from torch_dataloader_utils.filesystem.discovery import _install_hint
+
     assert "[gcs]" in _install_hint("gs://bucket/data/")
 
 
 def test_install_hint_gcs():
     from torch_dataloader_utils.filesystem.discovery import _install_hint
+
     assert "[gcs]" in _install_hint("gcs://bucket/data/")
 
 
 def test_install_hint_az():
     from torch_dataloader_utils.filesystem.discovery import _install_hint
+
     assert "[azure]" in _install_hint("az://container/data/")
 
 
 def test_install_hint_abfs():
     from torch_dataloader_utils.filesystem.discovery import _install_hint
+
     assert "[azure]" in _install_hint("abfs://container/data/")
 
 
 def test_install_hint_local_path():
     from torch_dataloader_utils.filesystem.discovery import _install_hint
+
     hint = _install_hint("/local/path/data/")
     assert "pip install torch-dataloader-utils" in hint
     assert "[" not in hint  # no extra specifier for unknown/local
@@ -191,6 +209,7 @@ def test_install_hint_local_path():
 
 def test_install_hint_unknown_scheme():
     from torch_dataloader_utils.filesystem.discovery import _install_hint
+
     hint = _install_hint("hdfs://namenode/data/")
     assert "pip install torch-dataloader-utils" in hint
 
@@ -198,6 +217,7 @@ def test_install_hint_unknown_scheme():
 # ---------------------------------------------------------------------------
 # Scenario: glob pattern matches only directories → returns empty list
 # ---------------------------------------------------------------------------
+
 
 def test_glob_skips_directories(tmp_path):
     """Glob that matches a directory (not a file) should not include it."""
@@ -213,6 +233,7 @@ def test_glob_skips_directories(tmp_path):
 # ---------------------------------------------------------------------------
 # Scenario: fsspec error surfacing
 # ---------------------------------------------------------------------------
+
 
 def _mock_fs_with_exists(exc_on_ls=None, exists_returns=True, is_dir=True):
     """Build a mock fsspec filesystem that raises on ls/stat."""
@@ -281,4 +302,3 @@ def test_file_not_found_passthrough_not_double_wrapped(tmp_path):
     missing = str(tmp_path / "does_not_exist")
     with pytest.raises(FileNotFoundError, match="does_not_exist"):
         discover_files(missing)
-

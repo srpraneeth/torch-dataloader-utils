@@ -1,11 +1,17 @@
 import pyarrow as pa
-import numpy as np
-
 
 _NUMERIC_TYPES = (
-    pa.int8(), pa.int16(), pa.int32(), pa.int64(),
-    pa.uint8(), pa.uint16(), pa.uint32(), pa.uint64(),
-    pa.float16(), pa.float32(), pa.float64(),
+    pa.int8(),
+    pa.int16(),
+    pa.int32(),
+    pa.int64(),
+    pa.uint8(),
+    pa.uint16(),
+    pa.uint32(),
+    pa.uint64(),
+    pa.float16(),
+    pa.float32(),
+    pa.float64(),
     pa.bool_(),
 )
 
@@ -43,6 +49,7 @@ def convert_batch(batch: pa.RecordBatch, output_format: str) -> object:
 
     if output_format == "torch":
         import torch
+
         result = {}
         for name in batch.schema.names:
             col = batch.column(name)
@@ -55,6 +62,5 @@ def convert_batch(batch: pa.RecordBatch, output_format: str) -> object:
         return result
 
     raise ValueError(
-        f"Unsupported output_format {output_format!r}. "
-        "Supported: torch, numpy, arrow, dict"
+        f"Unsupported output_format {output_format!r}. Supported: torch, numpy, arrow, dict"
     )

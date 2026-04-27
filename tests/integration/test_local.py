@@ -4,6 +4,7 @@ Integration tests for the local filesystem backend.
 Run with:
     uv run pytest tests/integration/ -m integration -v
 """
+
 import json
 from pathlib import Path
 
@@ -18,19 +19,21 @@ import torch
 
 from torch_dataloader_utils.dataset.structured import StructuredDataset
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_table(n_rows: int, row_id_offset: int = 0) -> pa.Table:
     row_ids = list(range(row_id_offset, row_id_offset + n_rows))
-    return pa.table({
-        "row_id":    pa.array(row_ids, type=pa.int32()),
-        "feature_a": pa.array([float(i % 10) for i in row_ids], type=pa.float32()),
-        "feature_b": pa.array([i % 100 for i in row_ids], type=pa.int32()),
-        "label":     pa.array([i % 2 for i in row_ids], type=pa.int32()),
-    })
+    return pa.table(
+        {
+            "row_id": pa.array(row_ids, type=pa.int32()),
+            "feature_a": pa.array([float(i % 10) for i in row_ids], type=pa.float32()),
+            "feature_b": pa.array([i % 100 for i in row_ids], type=pa.int32()),
+            "label": pa.array([i % 2 for i in row_ids], type=pa.int32()),
+        }
+    )
 
 
 def _collect(loader) -> dict[str, list]:
@@ -51,6 +54,7 @@ def _collect(loader) -> dict[str, list]:
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def parquet_dir(tmp_path) -> tuple[Path, int]:
@@ -90,6 +94,7 @@ def jsonl_dir(tmp_path) -> tuple[Path, int]:
 # ---------------------------------------------------------------------------
 # Scenario: Full read per format
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_parquet_full_read(parquet_dir):
@@ -135,12 +140,11 @@ def test_jsonl_full_read(jsonl_dir):
 # Scenario: Batch is dict[str, torch.Tensor]
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_output_is_torch_tensors(parquet_dir):
     path, _ = parquet_dir
-    loader, _ = StructuredDataset.create_dataloader(
-        path=str(path), format="parquet", num_workers=0
-    )
+    loader, _ = StructuredDataset.create_dataloader(path=str(path), format="parquet", num_workers=0)
     batch = next(iter(loader))
     assert isinstance(batch, dict)
     assert isinstance(batch["row_id"], torch.Tensor)
@@ -150,6 +154,7 @@ def test_output_is_torch_tensors(parquet_dir):
 # ---------------------------------------------------------------------------
 # Scenario: output_format="numpy"
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_output_format_numpy(parquet_dir):
@@ -165,11 +170,14 @@ def test_output_format_numpy(parquet_dir):
 # Scenario: Column projection
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_column_projection(parquet_dir):
     path, _ = parquet_dir
     loader, _ = StructuredDataset.create_dataloader(
-        path=str(path), format="parquet", num_workers=0,
+        path=str(path),
+        format="parquet",
+        num_workers=0,
         columns=["feature_a", "label"],
     )
     batch = next(iter(loader))
@@ -182,13 +190,16 @@ def test_column_projection(parquet_dir):
 # Scenario: Predicate pushdown
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_predicate_pushdown(parquet_dir):
     path, _ = parquet_dir
     # feature_b = row_id % 100, so feature_b >= 50 keeps rows where row_id % 100 >= 50
     # Each of 3 files has 100 rows with feature_b 0-99 → 50 rows per file → 150 total
     loader, _ = StructuredDataset.create_dataloader(
-        path=str(path), format="parquet", num_workers=0,
+        path=str(path),
+        format="parquet",
+        num_workers=0,
         filters=pc.field("feature_b") >= 50,
     )
     rows = _collect(loader)
@@ -199,6 +210,7 @@ def test_predicate_pushdown(parquet_dir):
 # ---------------------------------------------------------------------------
 # Scenario: Glob pattern
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_glob_pattern(tmp_path):
@@ -219,13 +231,12 @@ def test_glob_pattern(tmp_path):
 # Scenario: Single file
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_single_file(tmp_path):
     p = tmp_path / "single.parquet"
     pq.write_table(_make_table(100), p)
-    loader, _ = StructuredDataset.create_dataloader(
-        path=str(p), format="parquet", num_workers=0
-    )
+    loader, _ = StructuredDataset.create_dataloader(path=str(p), format="parquet", num_workers=0)
     rows = _collect(loader)
     assert len(rows["row_id"]) == 100
 
@@ -233,6 +244,7 @@ def test_single_file(tmp_path):
 # ---------------------------------------------------------------------------
 # Scenario: No rows dropped or duplicated
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_no_rows_dropped_or_duplicated(parquet_dir):
@@ -250,14 +262,19 @@ def test_no_rows_dropped_or_duplicated(parquet_dir):
 # Scenario: Shuffle reproducibility
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_shuffle_reproducibility(parquet_dir):
     path, _ = parquet_dir
 
     def _run():
         loader, _ = StructuredDataset.create_dataloader(
-            path=str(path), format="parquet", num_workers=0,
-            shuffle=True, shuffle_seed=42, batch_size=300,
+            path=str(path),
+            format="parquet",
+            num_workers=0,
+            shuffle=True,
+            shuffle_seed=42,
+            batch_size=300,
         )
         return _collect(loader)["row_id"]
 
@@ -270,8 +287,12 @@ def test_shuffle_differs_from_no_shuffle(parquet_dir):
 
     def _run(shuffle):
         loader, _ = StructuredDataset.create_dataloader(
-            path=str(path), format="parquet", num_workers=0,
-            shuffle=shuffle, shuffle_seed=42, batch_size=300,
+            path=str(path),
+            format="parquet",
+            num_workers=0,
+            shuffle=shuffle,
+            shuffle_seed=42,
+            batch_size=300,
         )
         return _collect(loader)["row_id"]
 
@@ -282,6 +303,7 @@ def test_shuffle_differs_from_no_shuffle(parquet_dir):
 # ---------------------------------------------------------------------------
 # Scenario: Multi-worker — no rows dropped or duplicated
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_multi_worker_no_rows_dropped(tmp_path):
@@ -301,6 +323,7 @@ def test_multi_worker_no_rows_dropped(tmp_path):
 # Scenario: Multi-worker — more files than workers
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_multi_worker_more_files_than_workers(tmp_path):
     for i in range(6):
@@ -318,6 +341,7 @@ def test_multi_worker_more_files_than_workers(tmp_path):
 # ---------------------------------------------------------------------------
 # Scenario: Imbalanced files — size-balanced splits
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_imbalanced_files_size_balanced_splits(tmp_path):
@@ -346,8 +370,8 @@ def test_target_size_splits_are_balanced(tmp_path):
     With sub-file splitting, one huge file doesn't land entirely on one worker.
     Each worker's total row count should be within 1 row group of the other.
     """
-    from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
     from torch_dataloader_utils.filesystem.discovery import discover_files
+    from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
 
     # One huge file (8 row groups × 1000 rows) + one tiny file (1 row group × 100 rows)
     # Without sub-splitting: worker 0 gets 8000 rows, worker 1 gets 100 rows — terrible
@@ -380,6 +404,7 @@ def test_target_size_splits_are_balanced(tmp_path):
 # ---------------------------------------------------------------------------
 # Scenario: TargetSizeSplitStrategy — sub-file splitting of large Parquet file
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_target_size_sub_file_splitting(tmp_path):
@@ -457,6 +482,7 @@ def test_target_size_predicate_pushdown_with_row_range(tmp_path):
 # Scenario: TargetSizeSplitStrategy — multi-worker sub-file splitting
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_target_size_multi_worker_sub_file_splitting(tmp_path):
     """Single Parquet file split into chunks distributed across 2 workers — no rows lost."""
@@ -483,6 +509,7 @@ def test_target_size_multi_worker_sub_file_splitting(tmp_path):
 # ---------------------------------------------------------------------------
 # Scenario: TargetSizeSplitStrategy — column projection with RowRange
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_target_size_column_projection_with_row_range(tmp_path):
@@ -511,6 +538,7 @@ def test_target_size_column_projection_with_row_range(tmp_path):
 # ---------------------------------------------------------------------------
 # Scenario: TargetSizeSplitStrategy — mixed Parquet + CSV in same directory
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_target_size_mixed_parquet_and_csv(tmp_path):
@@ -547,6 +575,7 @@ def test_target_size_mixed_parquet_and_csv(tmp_path):
 # Scenario: TargetSizeSplitStrategy — shuffle preserves all rows
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_target_size_shuffle_no_rows_lost(tmp_path):
     """Shuffling chunks still returns every row exactly once."""
@@ -573,6 +602,7 @@ def test_target_size_shuffle_no_rows_lost(tmp_path):
 # Scenario: TargetSizeSplitStrategy — single row group file
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_target_size_single_row_group_file(tmp_path):
     """A Parquet file with exactly one row group produces one chunk and all rows."""
@@ -595,11 +625,12 @@ def test_target_size_single_row_group_file(tmp_path):
 # Scenario: Split correctness — chunk count and non-overlapping row ranges
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_target_size_chunk_count_matches_row_groups(tmp_path):
     """Number of chunks produced equals number of row groups when target_bytes=1."""
-    from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
     from torch_dataloader_utils.filesystem.discovery import discover_files
+    from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
 
     writer = pq.ParquetWriter(tmp_path / "f.parquet", _make_table(1).schema)
     for i in range(7):
@@ -617,8 +648,8 @@ def test_target_size_chunk_count_matches_row_groups(tmp_path):
 @pytest.mark.integration
 def test_target_size_row_ranges_are_non_overlapping(tmp_path):
     """Row ranges across all chunks within a file are contiguous and non-overlapping."""
-    from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
     from torch_dataloader_utils.filesystem.discovery import discover_files
+    from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
 
     writer = pq.ParquetWriter(tmp_path / "f.parquet", _make_table(1).schema)
     for i in range(5):
@@ -659,8 +690,8 @@ def test_target_size_more_workers_than_chunks(tmp_path):
 @pytest.mark.integration
 def test_target_size_chunks_distributed_across_4_workers(tmp_path):
     """With 4 workers and 8 row groups, each worker gets exactly 2 chunks."""
-    from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
     from torch_dataloader_utils.filesystem.discovery import discover_files
+    from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
 
     writer = pq.ParquetWriter(tmp_path / "f.parquet", _make_table(1).schema)
     for i in range(8):
@@ -679,12 +710,15 @@ def test_target_size_chunks_distributed_across_4_workers(tmp_path):
 # Scenario: Predicate — compound AND, boundary values, all-pass, all-fail
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_predicate_compound_and(parquet_dir):
     """Compound AND filter: feature_b in [20, 60) returns correct subset."""
     path, _ = parquet_dir
     loader, _ = StructuredDataset.create_dataloader(
-        path=str(path), format="parquet", num_workers=0,
+        path=str(path),
+        format="parquet",
+        num_workers=0,
         filters=(pc.field("feature_b") >= 20) & (pc.field("feature_b") < 60),
     )
     rows = _collect(loader)
@@ -698,7 +732,9 @@ def test_predicate_all_rows_pass(parquet_dir):
     """Filter that matches all rows returns the full dataset."""
     path, _ = parquet_dir
     loader, _ = StructuredDataset.create_dataloader(
-        path=str(path), format="parquet", num_workers=0,
+        path=str(path),
+        format="parquet",
+        num_workers=0,
         filters=pc.field("feature_b") >= 0,
     )
     rows = _collect(loader)
@@ -710,7 +746,9 @@ def test_predicate_no_rows_pass(parquet_dir):
     """Filter that matches no rows yields no batches."""
     path, _ = parquet_dir
     loader, _ = StructuredDataset.create_dataloader(
-        path=str(path), format="parquet", num_workers=0,
+        path=str(path),
+        format="parquet",
+        num_workers=0,
         filters=pc.field("feature_b") > 999,
     )
     rows = _collect(loader)
@@ -722,7 +760,9 @@ def test_predicate_exact_boundary(parquet_dir):
     """Boundary value: feature_b == 0 returns exactly 3 rows (one per file)."""
     path, _ = parquet_dir
     loader, _ = StructuredDataset.create_dataloader(
-        path=str(path), format="parquet", num_workers=0,
+        path=str(path),
+        format="parquet",
+        num_workers=0,
         filters=pc.field("feature_b") == 0,
     )
     rows = _collect(loader)
@@ -734,12 +774,15 @@ def test_predicate_exact_boundary(parquet_dir):
 # Scenario: Projection — single column, all columns, combined with predicate
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_projection_single_column(parquet_dir):
     """Projecting a single column returns only that column."""
     path, _ = parquet_dir
     loader, _ = StructuredDataset.create_dataloader(
-        path=str(path), format="parquet", num_workers=0,
+        path=str(path),
+        format="parquet",
+        num_workers=0,
         columns=["label"],
     )
     batch = next(iter(loader))
@@ -751,7 +794,9 @@ def test_projection_combined_with_predicate(parquet_dir):
     """Projection and predicate applied together: correct columns and filtered rows."""
     path, _ = parquet_dir
     loader, _ = StructuredDataset.create_dataloader(
-        path=str(path), format="parquet", num_workers=0,
+        path=str(path),
+        format="parquet",
+        num_workers=0,
         columns=["feature_a", "label"],
         filters=pc.field("feature_b") >= 50,
     )
@@ -788,13 +833,16 @@ def test_target_size_projection_and_predicate_with_row_range(tmp_path):
 # Scenario: Batch size edge cases
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_batch_size_larger_than_file(tmp_path):
     """batch_size larger than total rows yields a single batch with all rows."""
     pq.write_table(_make_table(50), tmp_path / "f.parquet")
     loader, _ = StructuredDataset.create_dataloader(
-        path=str(tmp_path / "f.parquet"), format="parquet",
-        num_workers=0, batch_size=10_000,
+        path=str(tmp_path / "f.parquet"),
+        format="parquet",
+        num_workers=0,
+        batch_size=10_000,
     )
     batches = list(loader)
     assert len(batches) == 1
@@ -806,8 +854,10 @@ def test_batch_size_one(tmp_path):
     """batch_size=1 yields one batch per row."""
     pq.write_table(_make_table(10), tmp_path / "f.parquet")
     loader, _ = StructuredDataset.create_dataloader(
-        path=str(tmp_path / "f.parquet"), format="parquet",
-        num_workers=0, batch_size=1,
+        path=str(tmp_path / "f.parquet"),
+        format="parquet",
+        num_workers=0,
+        batch_size=1,
     )
     batches = list(loader)
     assert len(batches) == 10
@@ -817,6 +867,7 @@ def test_batch_size_one(tmp_path):
 # ---------------------------------------------------------------------------
 # Scenario: Shuffle — epoch changes order, seed controls reproducibility
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_target_size_shuffle_epoch_changes_order(tmp_path):
@@ -832,7 +883,9 @@ def test_target_size_shuffle_epoch_changes_order(tmp_path):
     strategy = TargetSizeSplitStrategy(target_bytes=1, shuffle=True, seed=42)
     loader, dataset = StructuredDataset.create_dataloader(
         path=str(tmp_path / "f.parquet"),
-        format="parquet", num_workers=0, batch_size=100,
+        format="parquet",
+        num_workers=0,
+        batch_size=100,
         split_strategy=strategy,
     )
 
@@ -861,7 +914,9 @@ def test_target_size_shuffle_different_seeds(tmp_path):
         strategy = TargetSizeSplitStrategy(target_bytes=1, shuffle=True, seed=seed)
         loader, _ = StructuredDataset.create_dataloader(
             path=str(tmp_path / "f.parquet"),
-            format="parquet", num_workers=0, batch_size=600,
+            format="parquet",
+            num_workers=0,
+            batch_size=600,
             split_strategy=strategy,
         )
         return _collect(loader)["row_id"]
@@ -873,11 +928,12 @@ def test_target_size_shuffle_different_seeds(tmp_path):
 # Scenario: ORC with TargetSizeSplitStrategy — whole-file chunks, no sub-split
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_target_size_orc_whole_file_no_sub_split(tmp_path):
     """ORC files are not sub-split — each file becomes one chunk, all rows returned."""
-    from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
     from torch_dataloader_utils.filesystem.discovery import discover_files
+    from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
 
     for i in range(3):
         pa_orc.write_table(_make_table(100, row_id_offset=i * 100), str(tmp_path / f"f{i}.orc"))
@@ -892,7 +948,9 @@ def test_target_size_orc_whole_file_no_sub_split(tmp_path):
     assert all(c.row_range is None for c in chunks)
 
     loader, _ = StructuredDataset.create_dataloader(
-        path=str(tmp_path), format="orc", num_workers=0,
+        path=str(tmp_path),
+        format="orc",
+        num_workers=0,
         split_strategy=strategy,
     )
     rows = _collect(loader)
@@ -902,6 +960,7 @@ def test_target_size_orc_whole_file_no_sub_split(tmp_path):
 # ---------------------------------------------------------------------------
 # Scenario: Hive partitioning end-to-end
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_hive_partitioning_scanner_path(tmp_path):
@@ -991,5 +1050,3 @@ def test_hive_partitioning_create_dataloader_api(tmp_path):
             all_splits.extend(batch["split"])
     assert all(s == "train" for s in all_splits)
     assert len(all_splits) == 30
-
-

@@ -1,19 +1,17 @@
 """Unit tests for TargetSizeSplitStrategy."""
+
 import os
-import tempfile
-from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
 
-from torch_dataloader_utils.splits.core import DataFileInfo, RowRange
+from torch_dataloader_utils.splits.core import DataFileInfo
 from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy, _parquet_chunks
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_parquet(path: str, num_row_groups: int, rows_per_group: int = 100) -> None:
     """Write a Parquet file with a fixed number of row groups."""
@@ -38,6 +36,7 @@ def _non_parquet(name: str = "data.csv") -> DataFileInfo:
 # ---------------------------------------------------------------------------
 # _parquet_chunks
 # ---------------------------------------------------------------------------
+
 
 class TestParquetChunks:
     def test_single_row_group_yields_one_chunk(self, tmp_path):
@@ -96,6 +95,7 @@ class TestParquetChunks:
 # TargetSizeSplitStrategy.generate — non-Parquet
 # ---------------------------------------------------------------------------
 
+
 class TestNonParquetFiles:
     def test_csv_files_become_single_chunks(self):
         files = [_non_parquet(f"f{i}.csv") for i in range(4)]
@@ -126,6 +126,7 @@ class TestNonParquetFiles:
 # ---------------------------------------------------------------------------
 # TargetSizeSplitStrategy.generate — assignment
 # ---------------------------------------------------------------------------
+
 
 class TestAssignment:
     def test_splits_distributed_across_workers(self, tmp_path):
@@ -163,6 +164,7 @@ class TestAssignment:
 # ---------------------------------------------------------------------------
 # Shuffle
 # ---------------------------------------------------------------------------
+
 
 class TestShuffle:
     def test_shuffle_reproducible_same_epoch(self, tmp_path):
@@ -202,6 +204,7 @@ class TestShuffle:
 # target_rows mode
 # ---------------------------------------------------------------------------
 
+
 class TestTargetRows:
     def test_target_rows_chunks_by_row_count(self, tmp_path):
         path = str(tmp_path / "f.parquet")
@@ -239,13 +242,20 @@ class TestTargetRows:
         path = str(tmp_path / "f.parquet")
         _make_parquet(path, num_row_groups=4, rows_per_group=100)
         # target_rows=None, large target_bytes → all groups in one chunk
-        chunks = list(_parquet_chunks(_file_info(path), target_bytes=1024 * 1024 * 1024, target_rows=None))
+        chunks = list(
+            _parquet_chunks(
+                _file_info(path),
+                target_bytes=1024 * 1024 * 1024,
+                target_rows=None,
+            )
+        )
         assert len(chunks) == 1
 
 
 # ---------------------------------------------------------------------------
 # _parquet_chunks: zero row groups edge case
 # ---------------------------------------------------------------------------
+
 
 class TestEmptyParquet:
     def test_zero_row_groups_yields_one_whole_file_chunk(self, tmp_path):

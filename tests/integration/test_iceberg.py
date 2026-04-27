@@ -7,11 +7,11 @@ Requires pyiceberg to be installed:
 Run with:
     uv run pytest tests/integration/test_iceberg.py -m integration -v
 """
+
 import os
 
 import pyarrow as pa
 import pyarrow.compute as pc
-import pyarrow.parquet as pq
 import pytest
 
 pytest.importorskip("pyiceberg", reason="pyiceberg not installed — skipping Iceberg tests")
@@ -23,24 +23,25 @@ from pyiceberg.types import (
     FloatType,
     IntegerType,
     NestedField,
-    StringType,
 )
 
 from torch_dataloader_utils.dataset.iceberg import IcebergDataset
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_arrow_table(n_rows: int, row_id_offset: int = 0) -> pa.Table:
     row_ids = list(range(row_id_offset, row_id_offset + n_rows))
-    return pa.table({
-        "row_id":    pa.array(row_ids, type=pa.int32()),
-        "feature_a": pa.array([float(i % 10) for i in row_ids], type=pa.float32()),
-        "feature_b": pa.array([i % 100 for i in row_ids], type=pa.int32()),
-        "label":     pa.array([i % 2 for i in row_ids], type=pa.int32()),
-    })
+    return pa.table(
+        {
+            "row_id": pa.array(row_ids, type=pa.int32()),
+            "feature_a": pa.array([float(i % 10) for i in row_ids], type=pa.float32()),
+            "feature_b": pa.array([i % 100 for i in row_ids], type=pa.int32()),
+            "label": pa.array([i % 2 for i in row_ids], type=pa.int32()),
+        }
+    )
 
 
 def _collect(loader) -> dict[str, list]:
@@ -59,6 +60,7 @@ def _collect(loader) -> dict[str, list]:
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def iceberg_catalog(tmp_path):
@@ -82,10 +84,10 @@ def iceberg_table_3files(iceberg_catalog):
     catalog, tmp_path = iceberg_catalog
 
     schema = Schema(
-        NestedField(1, "row_id",    IntegerType(), required=False),
-        NestedField(2, "feature_a", FloatType(),   required=False),
+        NestedField(1, "row_id", IntegerType(), required=False),
+        NestedField(2, "feature_a", FloatType(), required=False),
         NestedField(3, "feature_b", IntegerType(), required=False),
-        NestedField(4, "label",     IntegerType(), required=False),
+        NestedField(4, "label", IntegerType(), required=False),
     )
 
     table = catalog.create_table("mydb.test_table", schema=schema)
@@ -106,6 +108,7 @@ def iceberg_table_3files(iceberg_catalog):
 # ---------------------------------------------------------------------------
 # Scenario: End-to-end Parquet read
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_end_to_end_parquet_read(iceberg_table_3files):
@@ -132,6 +135,7 @@ def test_end_to_end_parquet_read(iceberg_table_3files):
 # Scenario: Column projection
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_column_projection(iceberg_table_3files):
     """Only requested columns are returned."""
@@ -154,6 +158,7 @@ def test_column_projection(iceberg_table_3files):
 # Scenario: Predicate pushdown
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_predicate_pushdown(iceberg_table_3files):
     """Row-level filter: feature_b >= 50 keeps 50 rows per file → 150 total."""
@@ -174,6 +179,7 @@ def test_predicate_pushdown(iceberg_table_3files):
 # ---------------------------------------------------------------------------
 # Scenario: No rows dropped or duplicated
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_no_rows_dropped_or_duplicated(iceberg_table_3files):
@@ -196,6 +202,7 @@ def test_no_rows_dropped_or_duplicated(iceberg_table_3files):
 # ---------------------------------------------------------------------------
 # Scenario: Snapshot time travel
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_snapshot_time_travel(iceberg_catalog):
@@ -237,6 +244,7 @@ def test_snapshot_time_travel(iceberg_catalog):
 # Scenario: create_dataloader returns (DataLoader, IcebergDataset)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_create_dataloader_returns_tuple(iceberg_table_3files):
     """Return type is (DataLoader, IcebergDataset)."""
@@ -261,6 +269,7 @@ def test_create_dataloader_returns_tuple(iceberg_table_3files):
 # Scenario: set_epoch works without error
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_set_epoch(iceberg_table_3files):
     """set_epoch can be called before each epoch."""
@@ -282,6 +291,7 @@ def test_set_epoch(iceberg_table_3files):
 # Scenario: Missing pyiceberg raises ImportError
 # ---------------------------------------------------------------------------
 
+
 def test_missing_pyiceberg_raises():
     """ImportError with pip install hint when pyiceberg is not installed."""
     import sys
@@ -297,6 +307,7 @@ def test_missing_pyiceberg_raises():
 # ---------------------------------------------------------------------------
 # Scenario: No delete files — fast path confirmed
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_no_deletes_uses_fast_path(iceberg_table_3files):
@@ -315,6 +326,7 @@ def test_no_deletes_uses_fast_path(iceberg_table_3files):
 # ---------------------------------------------------------------------------
 # Scenario: Delete file detection — has_deletes flag set correctly
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_has_deletes_flag_set_when_delete_files_present(iceberg_catalog):
@@ -358,10 +370,12 @@ def test_has_deletes_flag_set_when_delete_files_present(iceberg_catalog):
 # Scenario: Output formats
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_output_format_numpy(iceberg_table_3files):
     """numpy output: each column is an ndarray."""
     import numpy as np
+
     catalog_config, _, _ = iceberg_table_3files
 
     loader, _ = IcebergDataset.create_dataloader(
@@ -415,6 +429,7 @@ def test_output_format_dict_with_collate(iceberg_table_3files):
 # Scenario: Validation errors
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_invalid_output_format_raises():
     """ValueError for unsupported output_format — raised before _resolve_files."""
@@ -440,6 +455,7 @@ def test_dict_without_collate_fn_raises():
 # Scenario: create_dataloader auto-detects num_workers
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_create_dataloader_num_workers_auto(iceberg_table_3files):
     """num_workers=None auto-detects CPU count - 1 (min 1)."""
@@ -461,6 +477,7 @@ def test_create_dataloader_num_workers_auto(iceberg_table_3files):
 # ---------------------------------------------------------------------------
 # Scenario: Shuffle produces different orders across epochs
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_shuffle_epoch_changes_split_order(iceberg_table_3files):
@@ -486,6 +503,7 @@ def test_shuffle_epoch_changes_split_order(iceberg_table_3files):
 # ---------------------------------------------------------------------------
 # Scenario: Multiple workers read disjoint data
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_multiple_workers_read_disjoint_data(iceberg_table_3files):
@@ -515,6 +533,7 @@ def test_multiple_workers_read_disjoint_data(iceberg_table_3files):
 # ---------------------------------------------------------------------------
 # Scenario: Delete path — __iter__ uses _read_task_with_deletes
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_iter_with_delete_flag_uses_slow_path(iceberg_catalog):
@@ -561,6 +580,7 @@ def test_iter_with_delete_flag_uses_slow_path(iceberg_catalog):
 # ---------------------------------------------------------------------------
 # Scenario: Worker beyond split count yields nothing
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_worker_beyond_split_count_yields_nothing(iceberg_table_3files):

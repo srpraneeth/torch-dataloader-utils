@@ -19,7 +19,9 @@ _SUPPORTED_OUTPUT_FORMATS = {"torch", "numpy", "arrow", "dict"}
 
 
 def _auto_select_strategy(
-    files: list[DataFileInfo], shuffle: bool, shuffle_seed: int,
+    files: list[DataFileInfo],
+    shuffle: bool,
+    shuffle_seed: int,
     split_bytes: int | str | None = None,
     split_rows: int | None = None,
 ) -> SplitStrategy:
@@ -75,9 +77,7 @@ class StructuredDataset(IterableDataset):
 
         if output_format not in _SUPPORTED_OUTPUT_FORMATS:
             supported = ", ".join(sorted(_SUPPORTED_OUTPUT_FORMATS))
-            raise ValueError(
-                f"Unsupported output_format {output_format!r}. Supported: {supported}"
-            )
+            raise ValueError(f"Unsupported output_format {output_format!r}. Supported: {supported}")
 
         if filters is not None and not isinstance(filters, pc.Expression):
             raise TypeError(
@@ -134,19 +134,25 @@ class StructuredDataset(IterableDataset):
         self._splits = self._generate_splits()
         logger.info(
             "Regenerated splits for epoch %d  strategy=%s  num_workers=%d",
-            epoch, type(self._strategy).__name__, self._num_workers,
+            epoch,
+            type(self._strategy).__name__,
+            self._num_workers,
         )
 
     def __iter__(self) -> Iterator[Any]:
         from torch.utils.data import get_worker_info
+
         info = get_worker_info()
         worker_id = info.id if info is not None else 0
 
         if worker_id >= len(self._splits):
             # More workers than splits — this worker has nothing to do
             logger.debug(
-                "Worker %d: no split assigned (only %d split(s) for %d worker(s)) — yielding nothing",
-                worker_id, len(self._splits), self._num_workers,
+                "Worker %d: no split assigned (only %d split(s) for %d worker(s))"
+                " — yielding nothing",
+                worker_id,
+                len(self._splits),
+                self._num_workers,
             )
             return
 
@@ -154,7 +160,9 @@ class StructuredDataset(IterableDataset):
         file_paths = [s.file.path for s in shard.splits]
         logger.info(
             "Worker %d: assigned shard %d with %d split(s)",
-            worker_id, shard.id, len(shard.splits),
+            worker_id,
+            shard.id,
+            len(shard.splits),
         )
         for path in file_paths:
             logger.debug("Worker %d: shard %d file → %s", worker_id, shard.id, path)
@@ -201,8 +209,12 @@ class StructuredDataset(IterableDataset):
         logger.info(
             "create_dataloader: path=%s  format=%s  num_workers=%d  batch_size=%d  "
             "output_format=%s  shuffle=%s  columns=%s  filters=%s",
-            path, format, num_workers, batch_size,
-            output_format, shuffle,
+            path,
+            format,
+            num_workers,
+            batch_size,
+            output_format,
+            shuffle,
             columns if columns else "all",
             "yes" if filters is not None else "none",
         )
@@ -214,9 +226,11 @@ class StructuredDataset(IterableDataset):
             try:
                 if format == "parquet":
                     import pyarrow.parquet as pq
+
                     schema = pq.read_schema(files[0].path)
                 else:
                     import pyarrow.dataset as pads
+
                     schema = pads.dataset(files[0].path, format=format).schema
                 field_summary = ", ".join(f"{f.name}: {f.type}" for f in schema)
                 logger.info("Inferred schema from %s: [%s]", files[0].path, field_summary)

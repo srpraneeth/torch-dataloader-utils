@@ -5,6 +5,7 @@ Usage:
     uv run python e2e/gen_data.py --out-dir /tmp/e2e_data --files 20 --rows 100000
     uv run python e2e/gen_data.py --out-dir /tmp/e2e_data --files 5 --rows 10000 --unequal
 """
+
 import argparse
 import os
 
@@ -38,8 +39,9 @@ def main():
     parser.add_argument("--files", type=int, default=20, help="Number of Parquet files")
     parser.add_argument("--rows", type=int, default=100_000, help="Rows per file (base)")
     parser.add_argument(
-        "--unequal", action="store_true",
-        help="Make files very unequal in size (tests worker balance)"
+        "--unequal",
+        action="store_true",
+        help="Make files very unequal in size (tests worker balance)",
     )
     parser.add_argument("--row-group-size", type=int, default=10_000)
     args = parser.parse_args()

@@ -1,5 +1,5 @@
-import pyarrow as pa
 import numpy as np
+import pyarrow as pa
 import pytest
 
 from torch_dataloader_utils.dataset.output import convert_batch
@@ -19,6 +19,7 @@ def _batch(include_string: bool = False) -> pa.RecordBatch:
 # output_format="arrow"
 # ---------------------------------------------------------------------------
 
+
 def test_arrow_returns_record_batch():
     batch = _batch()
     result = convert_batch(batch, "arrow")
@@ -29,6 +30,7 @@ def test_arrow_returns_record_batch():
 # ---------------------------------------------------------------------------
 # output_format="dict"
 # ---------------------------------------------------------------------------
+
 
 def test_dict_returns_lists():
     batch = _batch()
@@ -48,6 +50,7 @@ def test_dict_handles_string_columns():
 # ---------------------------------------------------------------------------
 # output_format="numpy"
 # ---------------------------------------------------------------------------
+
 
 def test_numpy_numeric_columns_are_ndarray():
     batch = _batch()
@@ -73,8 +76,10 @@ def test_numpy_values_correct():
 # output_format="torch"
 # ---------------------------------------------------------------------------
 
+
 def test_torch_numeric_columns_are_tensors():
     import torch
+
     batch = _batch()
     result = convert_batch(batch, "torch")
     assert isinstance(result["feature_a"], torch.Tensor)
@@ -89,7 +94,6 @@ def test_torch_string_columns_pass_through_as_list():
 
 
 def test_torch_values_correct():
-    import torch
     batch = _batch()
     result = convert_batch(batch, "torch")
     assert result["label"].tolist() == [0, 1, 0]
@@ -97,6 +101,7 @@ def test_torch_values_correct():
 
 def test_torch_dtype_preserved():
     import torch
+
     batch = _batch()
     result = convert_batch(batch, "torch")
     assert result["feature_a"].dtype == torch.float32
@@ -106,6 +111,7 @@ def test_torch_dtype_preserved():
 # ---------------------------------------------------------------------------
 # Unsupported format
 # ---------------------------------------------------------------------------
+
 
 def test_unsupported_output_format_raises():
     batch = _batch()
@@ -117,19 +123,24 @@ def test_unsupported_output_format_raises():
 # All numeric types produce tensors / ndarrays
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("arrow_type,torch_dtype", [
-    (pa.int8(),    "torch.int8"),
-    (pa.int16(),   "torch.int16"),
-    (pa.int32(),   "torch.int32"),
-    (pa.int64(),   "torch.int64"),
-    (pa.uint8(),   "torch.uint8"),
-    (pa.float16(), "torch.float16"),
-    (pa.float32(), "torch.float32"),
-    (pa.float64(), "torch.float64"),
-    (pa.bool_(),   "torch.bool"),
-])
+
+@pytest.mark.parametrize(
+    "arrow_type,torch_dtype",
+    [
+        (pa.int8(), "torch.int8"),
+        (pa.int16(), "torch.int16"),
+        (pa.int32(), "torch.int32"),
+        (pa.int64(), "torch.int64"),
+        (pa.uint8(), "torch.uint8"),
+        (pa.float16(), "torch.float16"),
+        (pa.float32(), "torch.float32"),
+        (pa.float64(), "torch.float64"),
+        (pa.bool_(), "torch.bool"),
+    ],
+)
 def test_torch_numeric_types(arrow_type, torch_dtype):
     import torch
+
     values = [True, False, True] if arrow_type == pa.bool_() else [1, 0, 1]
     arr = pa.array(values, type=arrow_type)
     batch = pa.record_batch({"col": arr})
@@ -138,12 +149,23 @@ def test_torch_numeric_types(arrow_type, torch_dtype):
     assert str(result["col"].dtype) == torch_dtype
 
 
-@pytest.mark.parametrize("arrow_type", [
-    pa.int8(), pa.int16(), pa.int32(), pa.int64(),
-    pa.uint8(), pa.uint16(), pa.uint32(), pa.uint64(),
-    pa.float16(), pa.float32(), pa.float64(),
-    pa.bool_(),
-])
+@pytest.mark.parametrize(
+    "arrow_type",
+    [
+        pa.int8(),
+        pa.int16(),
+        pa.int32(),
+        pa.int64(),
+        pa.uint8(),
+        pa.uint16(),
+        pa.uint32(),
+        pa.uint64(),
+        pa.float16(),
+        pa.float32(),
+        pa.float64(),
+        pa.bool_(),
+    ],
+)
 def test_numpy_numeric_types(arrow_type):
     values = [True, False, True] if arrow_type == pa.bool_() else [1, 0, 1]
     arr = pa.array(values, type=arrow_type)

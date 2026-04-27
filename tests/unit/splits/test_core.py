@@ -38,7 +38,7 @@ def test_split_defaults():
     f = DataFileInfo(path="f1.parquet")
     sp = Split(file=f)
     assert sp.file is f
-    assert sp.row_range is None   # full file read
+    assert sp.row_range is None  # full file read
 
 
 def test_split_with_row_range():
