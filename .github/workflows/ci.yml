@@ -28,8 +28,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv pip install torch==${{ matrix.torch-version }} --index-url https://download.pytorch.org/whl/cpu
-          uv pip install -e ".[dev]"
+          uv pip install --system torch==${{ matrix.torch-version }} --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --system -e ".[dev]"
 
       - name: Lint
         run: ruff check . && ruff format --check .
@@ -55,8 +55,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv pip install torch==2.3.0 --index-url https://download.pytorch.org/whl/cpu
-          uv pip install -e ".[dev,s3,iceberg]"
+          uv pip install --system torch==2.3.0 --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --system -e ".[dev,s3,iceberg]"
 
       - name: Integration tests
         run: pytest tests/integration -m integration
