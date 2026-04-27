@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+         <loc>https://srpraneeth.github.io/torch-dataloader-utils/</loc>
+         <lastmod>2026-04-27</lastmod>
+    </url>
+    <url>
+         <loc>https://srpraneeth.github.io/torch-dataloader-utils/iceberg/</loc>
+         <lastmod>2026-04-27</lastmod>
+    </url>
+    <url>
+         <loc>https://srpraneeth.github.io/torch-dataloader-utils/limitations/</loc>
+         <lastmod>2026-04-27</lastmod>
+    </url>
+    <url>
+         <loc>https://srpraneeth.github.io/torch-dataloader-utils/roadmap/</loc>
+         <lastmod>2026-04-27</lastmod>
+    </url>
+    <url>
+         <loc>https://srpraneeth.github.io/torch-dataloader-utils/splits/</loc>
+         <lastmod>2026-04-27</lastmod>
+    </url>
+    <url>
+         <loc>https://srpraneeth.github.io/torch-dataloader-utils/structured/</loc>
+         <lastmod>2026-04-27</lastmod>
+    </url>
+    <url>
+         <loc>https://srpraneeth.github.io/torch-dataloader-utils/training/</loc>
+         <lastmod>2026-04-27</lastmod>
+    </url>
+</urlset>
