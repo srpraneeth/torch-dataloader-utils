@@ -1,0 +1,48 @@
+site_name: torch-dataloader-utils
+site_description: Lightweight PyTorch DataLoader for structured data on cloud object storage
+site_url: https://srpraneeth.github.io/torch-dataloader-utils/
+repo_url: https://github.com/srpraneeth/torch-dataloader-utils
+repo_name: srpraneeth/torch-dataloader-utils
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - content.code.copy
+    - toc.follow
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - API:
+    - StructuredDataset: structured.md
+    - IcebergDataset: iceberg.md
+  - How It Works:
+    - Splits & Workers: splits.md
+    - Training Stack: training.md
+  - Limitations: limitations.md
+  - Roadmap: roadmap.md
