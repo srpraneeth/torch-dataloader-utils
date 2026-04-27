@@ -59,6 +59,7 @@ jobs:
           uv pip install --system "numpy>=1.26,<2"
           uv pip install --system torch==2.3.0 --index-url https://download.pytorch.org/whl/cpu
           uv pip install --system -e ".[dev,s3,iceberg]"
+          uv pip install --system "sqlalchemy>=2.0"
 
       - name: Integration tests
         run: pytest tests/integration -m integration
