@@ -1,9 +1,9 @@
+from torch_dataloader_utils.splits.balanced import SizeBalancedSplitStrategy
 from torch_dataloader_utils.splits.core import DataFileInfo, IcebergDataFileInfo
 from torch_dataloader_utils.splits.round_robin import RoundRobinSplitStrategy
-from torch_dataloader_utils.splits.balanced import SizeBalancedSplitStrategy
-
 
 # --- helpers ---
+
 
 def make_files(n: int) -> list[DataFileInfo]:
     return [DataFileInfo(path=f"f{i}.parquet") for i in range(n)]
@@ -38,8 +38,8 @@ def all_paths(shards) -> list[str]:
 # RoundRobinSplitStrategy
 # ============================================================
 
-class TestRoundRobin:
 
+class TestRoundRobin:
     def test_even_distribution(self):
         strategy = RoundRobinSplitStrategy()
         shards = strategy.generate(make_files(8), num_workers=4)
@@ -119,8 +119,8 @@ class TestRoundRobin:
 # SizeBalancedSplitStrategy
 # ============================================================
 
-class TestSizeBalanced:
 
+class TestSizeBalanced:
     def test_balanced_by_record_count(self):
         files = make_counted_files([1000, 500, 300, 200])
         strategy = SizeBalancedSplitStrategy()
@@ -138,9 +138,9 @@ class TestSizeBalanced:
     def test_record_count_preferred_over_file_size(self):
         files = [
             DataFileInfo(path="f0.parquet", record_count=1000, file_size=1),
-            DataFileInfo(path="f1.parquet", record_count=500,  file_size=999),
-            DataFileInfo(path="f2.parquet", record_count=300,  file_size=999),
-            DataFileInfo(path="f3.parquet", record_count=200,  file_size=999),
+            DataFileInfo(path="f1.parquet", record_count=500, file_size=999),
+            DataFileInfo(path="f2.parquet", record_count=300, file_size=999),
+            DataFileInfo(path="f3.parquet", record_count=200, file_size=999),
         ]
         strategy = SizeBalancedSplitStrategy()
         shards = strategy.generate(files, num_workers=2)
@@ -192,13 +192,13 @@ class TestSizeBalanced:
 # SplitStrategy protocol
 # ============================================================
 
+
 def test_custom_strategy_no_inheritance():
     from torch_dataloader_utils.splits.core import Shard, Split
 
     class MyStrategy:
         def generate(self, files, num_workers, epoch=0) -> list[Shard]:
-            return [Shard(id=i, splits=[Split(file=f) for f in files])
-                    for i in range(num_workers)]
+            return [Shard(id=i, splits=[Split(file=f) for f in files]) for i in range(num_workers)]
 
     shards = MyStrategy().generate(make_files(4), num_workers=2)
     assert len(shards) == 2
@@ -208,8 +208,8 @@ def test_custom_strategy_no_inheritance():
 # SizeBalancedSplitStrategy: mixed metadata
 # ============================================================
 
-class TestSizeBalancedMixedMetadata:
 
+class TestSizeBalancedMixedMetadata:
     def test_some_files_missing_weight_treated_as_zero(self):
         """Files with no record_count or file_size are treated as weight 0."""
         files = [

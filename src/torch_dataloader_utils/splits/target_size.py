@@ -5,18 +5,22 @@ from collections.abc import Iterator
 
 import pyarrow.parquet as pq
 
-from torch_dataloader_utils.splits.core import DataFileInfo, Shard, Split, RowRange
+from torch_dataloader_utils.splits.core import DataFileInfo, RowRange, Shard, Split
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TARGET_BYTES = 128 * 1024 * 1024  # 128 MiB
 
 _BYTE_UNITS = {
-    "tib": 1024**4, "tb": 1000**4,
-    "gib": 1024**3, "gb": 1000**3,
-    "mib": 1024**2, "mb": 1000**2,
-    "kib": 1024,    "kb": 1000,
-    "b":   1,
+    "tib": 1024**4,
+    "tb": 1000**4,
+    "gib": 1024**3,
+    "gb": 1000**3,
+    "mib": 1024**2,
+    "mb": 1000**2,
+    "kib": 1024,
+    "kb": 1000,
+    "b": 1,
 }
 
 
@@ -34,6 +38,7 @@ def parse_bytes(value: int | str) -> int:
             num = s[: -len(suffix)].strip()
             return int(float(num) * multiplier)
     return int(s)  # bare number string e.g. "10485760"
+
 
 def _parquet_chunks(
     file: DataFileInfo,
@@ -53,7 +58,8 @@ def _parquet_chunks(
     except Exception as e:
         logger.warning(
             "Could not read Parquet metadata for %s (%s) — treating as single chunk",
-            file.path, e,
+            file.path,
+            e,
         )
         yield Split(file=file, row_range=None)
         return
@@ -78,7 +84,7 @@ def _parquet_chunks(
         chunk_bytes += rg_bytes
         chunk_rows += rg_rows
 
-        at_last = (i == num_rg - 1)
+        at_last = i == num_rg - 1
         if target_rows is not None:
             chunk_full = chunk_rows >= target_rows
         else:
@@ -91,7 +97,11 @@ def _parquet_chunks(
             )
             logger.debug(
                 "Parquet chunk: %s  rows=[%d, %d)  bytes=%d  rg_end=%d",
-                file.path, chunk_start_row, chunk_start_row + chunk_rows, chunk_bytes, i,
+                file.path,
+                chunk_start_row,
+                chunk_start_row + chunk_rows,
+                chunk_bytes,
+                i,
             )
             chunk_start_row = current_row_offset + rg_rows
             chunk_bytes = 0
@@ -158,10 +168,12 @@ class TargetSizeSplitStrategy:
             rng.shuffle(all_splits)
         else:
             # LPT: sort splits largest → smallest so greedy heap gives near-optimal balance
-            all_splits.sort(key=lambda s: (
-                s.row_range.length if s.row_range is not None
-                else (s.file.file_size or 0)
-            ), reverse=True)
+            all_splits.sort(
+                key=lambda s: (
+                    s.row_range.length if s.row_range is not None else (s.file.file_size or 0)
+                ),
+                reverse=True,
+            )
 
         # Greedy min-heap: always assign next split to the least-loaded worker
         heap = [(0, i) for i in range(num_workers)]
@@ -169,25 +181,38 @@ class TargetSizeSplitStrategy:
         shards = [Shard(id=i) for i in range(num_workers)]
         for split in all_splits:
             split_size = (
-                split.row_range.length if split.row_range is not None
+                split.row_range.length
+                if split.row_range is not None
                 else (split.file.record_count or split.file.file_size or 1)
             )
             total, worker_id = heapq.heappop(heap)
             shards[worker_id].splits.append(split)
             heapq.heappush(heap, (total + split_size, worker_id))
 
-        mode = f"target_rows={self.target_rows}" if self.target_rows else f"target_bytes={self.target_bytes}"
+        mode = (
+            f"target_rows={self.target_rows}"
+            if self.target_rows
+            else f"target_bytes={self.target_bytes}"
+        )
         splits_per_worker = [len(s.splits) for s in shards]
         rows_per_worker = [
-            sum(sp.row_range.length if sp.row_range else (sp.file.record_count or 0)
-                for sp in s.splits)
+            sum(
+                sp.row_range.length if sp.row_range else (sp.file.record_count or 0)
+                for sp in s.splits
+            )
             for s in shards
         ]
         logger.info(
             "TargetSizeSplitStrategy: %d file(s) → %d split(s) → %d worker(s)  "
             "%s  epoch=%d  shuffle=%s  splits_per_worker=%s  rows_per_worker=%s",
-            len(files), len(all_splits), num_workers,
-            mode, epoch, self.shuffle, splits_per_worker, rows_per_worker,
+            len(files),
+            len(all_splits),
+            num_workers,
+            mode,
+            epoch,
+            self.shuffle,
+            splits_per_worker,
+            rows_per_worker,
         )
         for shard in shards:
             logger.debug(

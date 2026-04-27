@@ -3,22 +3,24 @@ Script to generate test fixtures.
 Run once: uv run python tests/fixtures/generate.py
 """
 
-import pathlib
 import json
+import pathlib
+
 import pyarrow as pa
-import pyarrow.parquet as pq
-import pyarrow.orc as orc
 import pyarrow.csv as pa_csv
-import io
+import pyarrow.orc as orc
+import pyarrow.parquet as pq
 
 FIXTURES = pathlib.Path(__file__).parent
 
 # Shared sample data
-TABLE = pa.table({
-    "feature_a": pa.array([1.0, 2.0, 3.0, 4.0, 5.0], type=pa.float32()),
-    "feature_b": pa.array([10, 20, 30, 40, 50], type=pa.int64()),
-    "label":     pa.array([0, 1, 0, 1, 0], type=pa.int32()),
-})
+TABLE = pa.table(
+    {
+        "feature_a": pa.array([1.0, 2.0, 3.0, 4.0, 5.0], type=pa.float32()),
+        "feature_b": pa.array([10, 20, 30, 40, 50], type=pa.int64()),
+        "label": pa.array([0, 1, 0, 1, 0], type=pa.int32()),
+    }
+)
 
 # Parquet
 pq.write_table(TABLE, FIXTURES / "sample.parquet")

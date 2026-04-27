@@ -1,13 +1,13 @@
+from torch_dataloader_utils.splits.balanced import SizeBalancedSplitStrategy
 from torch_dataloader_utils.splits.core import (
     DataFileInfo,
     IcebergDataFileInfo,
     RowRange,
-    Split,
     Shard,
+    Split,
     SplitStrategy,
 )
 from torch_dataloader_utils.splits.round_robin import RoundRobinSplitStrategy
-from torch_dataloader_utils.splits.balanced import SizeBalancedSplitStrategy
 
 __all__ = [
     "DataFileInfo",

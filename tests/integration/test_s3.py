@@ -7,6 +7,7 @@ in discovery.py and reader.py — the path that local tests cannot cover.
 Run with:
     uv run pytest tests/integration/test_s3.py -m integration -v
 """
+
 import io
 
 import boto3
@@ -28,14 +29,17 @@ REGION = "us-east-1"
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_table(n_rows: int, row_id_offset: int = 0) -> pa.Table:
     row_ids = list(range(row_id_offset, row_id_offset + n_rows))
-    return pa.table({
-        "row_id":    pa.array(row_ids, type=pa.int32()),
-        "feature_a": pa.array([float(i % 10) for i in row_ids], type=pa.float32()),
-        "feature_b": pa.array([i % 100 for i in row_ids], type=pa.int32()),
-        "label":     pa.array([i % 2 for i in row_ids], type=pa.int32()),
-    })
+    return pa.table(
+        {
+            "row_id": pa.array(row_ids, type=pa.int32()),
+            "feature_a": pa.array([float(i % 10) for i in row_ids], type=pa.float32()),
+            "feature_b": pa.array([i % 100 for i in row_ids], type=pa.int32()),
+            "label": pa.array([i % 2 for i in row_ids], type=pa.int32()),
+        }
+    )
 
 
 def _table_to_bytes(table: pa.Table) -> bytes:
@@ -79,6 +83,7 @@ def _storage_options() -> dict:
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(autouse=True)
 def aws_credentials(monkeypatch):
     """Ensure boto3/s3fs never hit real AWS."""
@@ -92,6 +97,7 @@ def aws_credentials(monkeypatch):
 # ---------------------------------------------------------------------------
 # Scenario: S3 directory discovery
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_s3_directory_discovery():
@@ -113,6 +119,7 @@ def test_s3_directory_discovery():
 # ---------------------------------------------------------------------------
 # Scenario: S3 glob pattern
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_s3_glob_pattern():
@@ -137,6 +144,7 @@ def test_s3_glob_pattern():
 # Scenario: S3 single file
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_s3_single_file():
     with mock_aws():
@@ -156,6 +164,7 @@ def test_s3_single_file():
 # Scenario: S3 path does not exist
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_s3_path_not_found():
     with mock_aws():
@@ -172,6 +181,7 @@ def test_s3_path_not_found():
 # ---------------------------------------------------------------------------
 # Scenario: S3 end-to-end Parquet read
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_s3_end_to_end_read():
@@ -198,6 +208,7 @@ def test_s3_end_to_end_read():
 # Scenario: S3 column projection
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_s3_column_projection():
     with mock_aws():
@@ -221,6 +232,7 @@ def test_s3_column_projection():
 # ---------------------------------------------------------------------------
 # Scenario: S3 predicate pushdown
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_s3_predicate_pushdown():
@@ -247,6 +259,7 @@ def test_s3_predicate_pushdown():
 # Scenario: S3 no rows dropped or duplicated
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_s3_no_rows_dropped_or_duplicated():
     with mock_aws():
@@ -272,6 +285,7 @@ def test_s3_no_rows_dropped_or_duplicated():
 # ---------------------------------------------------------------------------
 # Scenario: S3 combined projection + predicate
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_s3_projection_and_predicate():
@@ -300,6 +314,7 @@ def test_s3_projection_and_predicate():
 # ---------------------------------------------------------------------------
 # Scenario: S3 TargetSizeSplitStrategy sub-file splitting
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_s3_target_size_sub_file_splitting():
@@ -336,6 +351,7 @@ def test_s3_target_size_sub_file_splitting():
 # Scenario: S3 compound predicate AND
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_s3_compound_predicate():
     """Compound AND filter returns only rows satisfying both conditions over S3."""
@@ -360,6 +376,7 @@ def test_s3_compound_predicate():
 # ---------------------------------------------------------------------------
 # Scenario: S3 predicate eliminates all rows
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_s3_predicate_no_rows():

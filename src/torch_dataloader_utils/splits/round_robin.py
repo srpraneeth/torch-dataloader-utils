@@ -39,13 +39,18 @@ class RoundRobinSplitStrategy:
         logger.info(
             "RoundRobinSplitStrategy: %d files → %d workers  epoch=%d  shuffle=%s  "
             "splits_per_worker=%s",
-            len(files), num_workers, epoch, self.shuffle,
+            len(files),
+            num_workers,
+            epoch,
+            self.shuffle,
             split_counts,
         )
         for shard in shards:
             paths = [s.file.path for s in shard.splits]
             logger.debug(
                 "Shard %d: %d split(s)  %s",
-                shard.id, len(paths), paths,
+                shard.id,
+                len(paths),
+                paths,
             )
         return shards

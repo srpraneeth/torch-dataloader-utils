@@ -45,13 +45,16 @@ try:
         elif operation_model.has_streaming_output:
             try:
                 import httpx as _httpx
+
                 if isinstance(http_response.raw, _httpx.Response):
                     from aiobotocore.endpoint import HttpxStreamingBody
+
                     response_dict["body"] = HttpxStreamingBody(http_response.raw)
                     return response_dict
             except ImportError:
                 pass
             from botocore.response import StreamingBody as _SyncBody
+
             length = response_dict["headers"].get("content-length")
             response_dict["body"] = _SyncBody(http_response.raw, length)
         else:

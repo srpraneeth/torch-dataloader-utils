@@ -18,8 +18,9 @@ class IcebergDataFileInfo(DataFileInfo):
 @dataclass
 class RowRange:
     """Defines a row slice within a file. Used for sub-file splitting."""
-    offset: int   # start row (inclusive)
-    length: int   # number of rows to read
+
+    offset: int  # start row (inclusive)
+    length: int  # number of rows to read
 
 
 @dataclass
@@ -29,6 +30,7 @@ class Split:
     row_range=None means read the entire file.
     row_range=RowRange(offset, length) reads a sub-file slice.
     """
+
     file: DataFileInfo
     row_range: RowRange | None = None
 
@@ -36,6 +38,7 @@ class Split:
 @dataclass
 class Shard:
     """A worker's assignment: a collection of splits to process sequentially."""
+
     id: int
     splits: list[Split] = field(default_factory=list)
     row_count: int | None = None
@@ -48,5 +51,4 @@ class SplitStrategy(Protocol):
         files: list[DataFileInfo],
         num_workers: int,
         epoch: int = 0,
-    ) -> list[Shard]:
-        ...
+    ) -> list[Shard]: ...

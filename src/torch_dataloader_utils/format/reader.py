@@ -66,25 +66,35 @@ def read_split(
     """
     if format not in SUPPORTED_FORMATS:
         supported = ", ".join(sorted(SUPPORTED_FORMATS))
-        raise ValueError(
-            f"Unsupported format {format!r}. Supported formats: {supported}"
-        )
+        raise ValueError(f"Unsupported format {format!r}. Supported formats: {supported}")
 
     arrow_format = _FORMAT_ALIASES.get(format, format)
     opts = storage_options or {}
 
     n_splits = len(shard.splits)
     logger.info(
-        "Reading shard %d: %d split(s)  format=%s  batch_size=%d  columns=%s  filters=%s  partitioning=%s",
-        shard.id, n_splits, format, batch_size,
+        "Reading shard %d: %d split(s)  format=%s  batch_size=%d"
+        "  columns=%s  filters=%s  partitioning=%s",
+        shard.id,
+        n_splits,
+        format,
+        batch_size,
         columns if columns else "all",
         "yes" if filters is not None else "none",
         partitioning or "none",
     )
     for i, sp in enumerate(shard.splits):
         fname = sp.file.path.rsplit("/", 1)[-1]
-        rows = sp.row_range.length if sp.row_range is not None else (sp.file.record_count or sp.file.file_size or "?")
-        row_range = f"rows=[{sp.row_range.offset},{sp.row_range.offset + sp.row_range.length})" if sp.row_range is not None else "full"
+        rows = (
+            sp.row_range.length
+            if sp.row_range is not None
+            else (sp.file.record_count or sp.file.file_size or "?")
+        )
+        row_range = (
+            f"rows=[{sp.row_range.offset},{sp.row_range.offset + sp.row_range.length})"
+            if sp.row_range is not None
+            else "full"
+        )
         logger.info("  [%d] %s  %s  total=%s", i, fname, row_range, rows)
 
     total_batches = 0
@@ -96,8 +106,14 @@ def read_split(
 
         if split.row_range is not None and arrow_format == "parquet":
             gen = _read_parquet_row_range(
-                path, resolved_path, split.row_range, columns, filters, batch_size,
-                arrow_fs, partitioning,
+                path,
+                resolved_path,
+                split.row_range,
+                columns,
+                filters,
+                batch_size,
+                arrow_fs,
+                partitioning,
             )
         else:
             ds = pad.dataset(
@@ -119,10 +135,17 @@ def read_split(
 
         logger.debug(
             "Finished file: %s  batches=%d  rows_last_batch=%d",
-            path, file_batches, last_batch.num_rows if last_batch is not None else 0,
+            path,
+            file_batches,
+            last_batch.num_rows if last_batch is not None else 0,
         )
 
-    logger.info("Shard %d complete: %d batch(es) yielded from %d split(s)", shard.id, total_batches, n_splits)
+    logger.info(
+        "Shard %d complete: %d batch(es) yielded from %d split(s)",
+        shard.id,
+        total_batches,
+        n_splits,
+    )
 
 
 def _read_parquet_row_range(
@@ -192,9 +215,7 @@ def _read_parquet_row_range(
         offset += batch_size
 
 
-def _get_arrow_filesystem(
-    path: str, storage_options: dict
-) -> tuple[pafs.FileSystem | None, str]:
+def _get_arrow_filesystem(path: str, storage_options: dict) -> tuple[pafs.FileSystem | None, str]:
     """Return a (pyarrow FileSystem, resolved path) pair for the given path.
 
     For local paths returns (None, path) — pyarrow uses its default local fs.
@@ -211,4 +232,3 @@ def _get_arrow_filesystem(
     logger.debug("Wrapping %s filesystem in PyFileSystem for path: %s", type(fs).__name__, resolved)
     arrow_fs = pafs.PyFileSystem(pafs.FSSpecHandler(fs))
     return arrow_fs, resolved
-

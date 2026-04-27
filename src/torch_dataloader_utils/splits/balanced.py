@@ -49,7 +49,9 @@ class SizeBalancedSplitStrategy:
             logger.info(
                 "SizeBalancedSplitStrategy: no weight metadata, falling back to round-robin  "
                 "files=%d workers=%d epoch=%d",
-                len(files), num_workers, epoch,
+                len(files),
+                num_workers,
+                epoch,
             )
             shards = [Shard(id=i) for i in range(num_workers)]
             for i, file in enumerate(file_list):
@@ -58,7 +60,9 @@ class SizeBalancedSplitStrategy:
 
         # replace missing weights with 0 for bin-packing
         weights = [w if w is not None else 0 for w in weights]
-        weight_metric = "record_count" if file_list and file_list[0].record_count is not None else "file_size"
+        weight_metric = (
+            "record_count" if file_list and file_list[0].record_count is not None else "file_size"
+        )
 
         # greedy bin-packing — assign each file to the least-loaded shard
         shards = [Shard(id=i) for i in range(num_workers)]
@@ -72,14 +76,21 @@ class SizeBalancedSplitStrategy:
         logger.info(
             "SizeBalancedSplitStrategy: %d files → %d workers  epoch=%d  shuffle=%s  "
             "metric=%s  shard_totals=%s",
-            len(files), num_workers, epoch, self.shuffle,
-            weight_metric, totals,
+            len(files),
+            num_workers,
+            epoch,
+            self.shuffle,
+            weight_metric,
+            totals,
         )
         for shard in shards:
             shard_weight = sum(_file_weight(s.file) or 0 for s in shard.splits)
             logger.debug(
                 "Shard %d: %d split(s)  total_%s=%d  files=%s",
-                shard.id, len(shard.splits), weight_metric, shard_weight,
+                shard.id,
+                len(shard.splits),
+                weight_metric,
+                shard_weight,
                 [s.file.path for s in shard.splits],
             )
         return shards

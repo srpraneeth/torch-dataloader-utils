@@ -1,7 +1,7 @@
-import pytest
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+import pytest
 
 from torch_dataloader_utils.dataset.structured import StructuredDataset
 from torch_dataloader_utils.splits.core import DataFileInfo
@@ -11,12 +11,14 @@ FIXTURES = __import__("pathlib").Path(__file__).parent.parent.parent / "fixtures
 
 def _make_files(*paths: str) -> list[DataFileInfo]:
     import os
+
     return [DataFileInfo(path=p, file_size=os.path.getsize(p)) for p in paths]
 
 
 # ---------------------------------------------------------------------------
 # Construction validation
 # ---------------------------------------------------------------------------
+
 
 def test_invalid_format_raises():
     files = _make_files(str(FIXTURES / "sample.parquet"))
@@ -54,8 +56,8 @@ def test_arrow_with_collate_fn_does_not_raise():
 # Single-process iteration (num_workers=0 → worker_id=0)
 # ---------------------------------------------------------------------------
 
+
 def test_single_process_returns_all_rows():
-    import torch
     files = _make_files(str(FIXTURES / "sample.parquet"))
     ds = StructuredDataset(files=files, format="parquet", num_workers=1, batch_size=10)
     batches = list(ds)
@@ -65,6 +67,7 @@ def test_single_process_returns_all_rows():
 
 def test_single_process_output_is_torch():
     import torch
+
     files = _make_files(str(FIXTURES / "sample.parquet"))
     ds = StructuredDataset(files=files, format="parquet", num_workers=1)
     batch = next(iter(ds))
@@ -74,10 +77,9 @@ def test_single_process_output_is_torch():
 
 def test_single_process_output_numpy():
     import numpy as np
+
     files = _make_files(str(FIXTURES / "sample.parquet"))
-    ds = StructuredDataset(
-        files=files, format="parquet", num_workers=1, output_format="numpy"
-    )
+    ds = StructuredDataset(files=files, format="parquet", num_workers=1, output_format="numpy")
     batch = next(iter(ds))
     assert isinstance(batch["feature_a"], np.ndarray)
 
@@ -85,8 +87,11 @@ def test_single_process_output_numpy():
 def test_single_process_output_arrow_with_collate():
     files = _make_files(str(FIXTURES / "sample.parquet"))
     ds = StructuredDataset(
-        files=files, format="parquet", num_workers=1,
-        output_format="arrow", collate_fn=lambda x: x,
+        files=files,
+        format="parquet",
+        num_workers=1,
+        output_format="arrow",
+        collate_fn=lambda x: x,
     )
     batch = next(iter(ds))
     assert isinstance(batch, pa.RecordBatch)
@@ -95,8 +100,11 @@ def test_single_process_output_arrow_with_collate():
 def test_single_process_output_dict_with_collate():
     files = _make_files(str(FIXTURES / "sample.parquet"))
     ds = StructuredDataset(
-        files=files, format="parquet", num_workers=1,
-        output_format="dict", collate_fn=lambda x: x,
+        files=files,
+        format="parquet",
+        num_workers=1,
+        output_format="dict",
+        collate_fn=lambda x: x,
     )
     batch = next(iter(ds))
     assert isinstance(batch, dict)
@@ -106,6 +114,7 @@ def test_single_process_output_dict_with_collate():
 # ---------------------------------------------------------------------------
 # Column projection end-to-end
 # ---------------------------------------------------------------------------
+
 
 def test_column_projection():
     files = _make_files(str(FIXTURES / "sample.parquet"))
@@ -121,10 +130,13 @@ def test_column_projection():
 # Predicate pushdown end-to-end
 # ---------------------------------------------------------------------------
 
+
 def test_predicate_pushdown():
     files = _make_files(str(FIXTURES / "sample.parquet"))
     ds = StructuredDataset(
-        files=files, format="parquet", num_workers=1,
+        files=files,
+        format="parquet",
+        num_workers=1,
         filters=pc.field("feature_b") > 30,
     )
     batches = list(ds)
@@ -135,6 +147,7 @@ def test_predicate_pushdown():
 # ---------------------------------------------------------------------------
 # Shuffle
 # ---------------------------------------------------------------------------
+
 
 def test_no_shuffle_splits_cached(tmp_path):
     t = pa.table({"val": pa.array([1, 2], type=pa.int32())})
@@ -173,14 +186,17 @@ def test_shuffle_regenerates_splits(tmp_path):
 # Multi-worker assignment — mocked get_worker_info
 # ---------------------------------------------------------------------------
 
+
 def _make_multi_file_dataset(tmp_path, num_files: int, rows_per_file: int, num_workers: int):
     """Write num_files parquet files and return a StructuredDataset with num_workers splits."""
     for i in range(num_files):
-        t = pa.table({
-            "row_id": pa.array(
-                list(range(i * rows_per_file, (i + 1) * rows_per_file)), type=pa.int32()
-            )
-        })
+        t = pa.table(
+            {
+                "row_id": pa.array(
+                    list(range(i * rows_per_file, (i + 1) * rows_per_file)), type=pa.int32()
+                )
+            }
+        )
         pq.write_table(t, tmp_path / f"f{i}.parquet")
 
     files = _make_files(*[str(tmp_path / f"f{i}.parquet") for i in range(num_files)])
@@ -189,6 +205,7 @@ def _make_multi_file_dataset(tmp_path, num_files: int, rows_per_file: int, num_w
 
 def test_worker_0_reads_its_split(tmp_path):
     from unittest.mock import MagicMock, patch
+
     ds = _make_multi_file_dataset(tmp_path, num_files=4, rows_per_file=10, num_workers=4)
 
     mock_info = MagicMock()
@@ -201,6 +218,7 @@ def test_worker_0_reads_its_split(tmp_path):
 
 def test_worker_1_reads_its_split(tmp_path):
     from unittest.mock import MagicMock, patch
+
     ds = _make_multi_file_dataset(tmp_path, num_files=4, rows_per_file=10, num_workers=4)
 
     mock_info = MagicMock()
@@ -212,6 +230,7 @@ def test_worker_1_reads_its_split(tmp_path):
 
 def test_workers_read_disjoint_splits(tmp_path):
     from unittest.mock import MagicMock, patch
+
     ds = _make_multi_file_dataset(tmp_path, num_files=4, rows_per_file=10, num_workers=4)
 
     all_row_ids = []
@@ -229,6 +248,7 @@ def test_workers_read_disjoint_splits(tmp_path):
 
 def test_worker_beyond_split_count_yields_nothing(tmp_path):
     from unittest.mock import MagicMock, patch
+
     # 2 files, 2 workers — worker_id=5 has no split
     ds = _make_multi_file_dataset(tmp_path, num_files=2, rows_per_file=10, num_workers=2)
 
@@ -241,6 +261,7 @@ def test_worker_beyond_split_count_yields_nothing(tmp_path):
 
 def test_more_files_than_workers_all_rows_covered(tmp_path):
     from unittest.mock import MagicMock, patch
+
     # 6 files, 2 workers — each worker reads 3 files
     ds = _make_multi_file_dataset(tmp_path, num_files=6, rows_per_file=10, num_workers=2)
 
@@ -258,20 +279,20 @@ def test_more_files_than_workers_all_rows_covered(tmp_path):
 
 def test_imbalanced_files_no_rows_dropped(tmp_path):
     from unittest.mock import MagicMock, patch
+
     # 4 files with different row counts — SizeBalancedSplitStrategy kicks in
     row_counts = [40, 30, 20, 10]
     offset = 0
     paths = []
     for i, n in enumerate(row_counts):
-        t = pa.table({
-            "row_id": pa.array(list(range(offset, offset + n)), type=pa.int32())
-        })
+        t = pa.table({"row_id": pa.array(list(range(offset, offset + n)), type=pa.int32())})
         p = tmp_path / f"f{i}.parquet"
         pq.write_table(t, p)
         paths.append(str(p))
         offset += n
 
     import os
+
     files = [DataFileInfo(path=p, file_size=os.path.getsize(p)) for p in paths]
     ds = StructuredDataset(files=files, format="parquet", num_workers=2)
 
@@ -291,8 +312,10 @@ def test_imbalanced_files_no_rows_dropped(tmp_path):
 # num_workers=None auto-detect via create_dataloader
 # ---------------------------------------------------------------------------
 
+
 def test_create_dataloader_returns_dataloader():
     from torch.utils.data import DataLoader
+
     loader, _ = StructuredDataset.create_dataloader(
         path=str(FIXTURES),
         format="parquet",
@@ -304,7 +327,9 @@ def test_create_dataloader_returns_dataloader():
 
 def test_create_dataloader_num_workers_none():
     import os
+
     from torch.utils.data import DataLoader
+
     loader, _ = StructuredDataset.create_dataloader(
         path=str(FIXTURES),
         format="parquet",
@@ -319,6 +344,7 @@ def test_create_dataloader_num_workers_none():
 # ---------------------------------------------------------------------------
 # set_epoch with shuffle=False still regenerates splits
 # ---------------------------------------------------------------------------
+
 
 def test_set_epoch_shuffle_false_regenerates_splits(tmp_path):
     """set_epoch should regenerate splits even when shuffle=False."""
@@ -357,12 +383,17 @@ def test_set_epoch_shuffle_false_same_order_every_epoch(tmp_path):
 # numpy / torch with explicit collate_fn — should not raise
 # ---------------------------------------------------------------------------
 
+
 def test_numpy_output_with_collate_fn_does_not_raise():
     import numpy as np
+
     files = _make_files(str(FIXTURES / "sample.parquet"))
     ds = StructuredDataset(
-        files=files, format="parquet", num_workers=1,
-        output_format="numpy", collate_fn=lambda x: x,
+        files=files,
+        format="parquet",
+        num_workers=1,
+        output_format="numpy",
+        collate_fn=lambda x: x,
     )
     batch = next(iter(ds))
     assert isinstance(batch["feature_a"], np.ndarray)
@@ -370,10 +401,14 @@ def test_numpy_output_with_collate_fn_does_not_raise():
 
 def test_torch_output_with_collate_fn_does_not_raise():
     import torch
+
     files = _make_files(str(FIXTURES / "sample.parquet"))
     ds = StructuredDataset(
-        files=files, format="parquet", num_workers=1,
-        output_format="torch", collate_fn=lambda x: x,
+        files=files,
+        format="parquet",
+        num_workers=1,
+        output_format="torch",
+        collate_fn=lambda x: x,
     )
     batch = next(iter(ds))
     assert isinstance(batch["feature_a"], torch.Tensor)
@@ -382,6 +417,7 @@ def test_torch_output_with_collate_fn_does_not_raise():
 # ---------------------------------------------------------------------------
 # _auto_select_strategy — empty files → RoundRobinSplitStrategy (lines 27-28)
 # ---------------------------------------------------------------------------
+
 
 def test_auto_select_strategy_empty_files_returns_round_robin():
     """With no files, _auto_select_strategy falls back to RoundRobinSplitStrategy."""
@@ -403,6 +439,7 @@ def test_structured_dataset_empty_files_uses_round_robin():
 # ---------------------------------------------------------------------------
 # create_dataloader — non-torch output with no collate_fn sets passthrough (line 218)
 # ---------------------------------------------------------------------------
+
 
 def test_create_dataloader_non_torch_output_sets_passthrough_collate():
     """output_format='numpy' with no explicit collate_fn sets an identity collate on DataLoader."""
