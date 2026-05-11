@@ -20,12 +20,15 @@ Usage:
 
 import argparse
 import os
+import shutil
 import sys
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 try:
     from pyiceberg.catalog.sql import SqlCatalog
@@ -289,6 +292,75 @@ def run_snapshot_time_travel(catalog: SqlCatalog, catalog_config: dict) -> bool:
     return ok
 
 
+def run_rank_aware_sharding(catalog: SqlCatalog, catalog_config: dict) -> bool:
+    """[8] Rank-aware sharding — 3 ranks get disjoint row subsets"""
+    print("\n[8] Rank-aware sharding — 3 ranks get disjoint row subsets")
+
+    file_row_counts = [100, 300, 500, 200, 400, 700]
+    total_rows = sum(file_row_counts)  # 2200
+    tmp_files_dir = tempfile.mkdtemp()
+
+    try:
+        # Write each file as a Parquet file then register via add_files
+        schema = _iceberg_schema()
+        rank_table = catalog.create_table("e2e.rank_test_table", schema=schema)
+
+        parquet_paths: list[str] = []
+        offset = 0
+        for idx, n_rows in enumerate(file_row_counts):
+            batch = _make_arrow_batch(n_rows, offset)
+            fpath = Path(tmp_files_dir) / f"rank_part_{idx}.parquet"
+            pq.write_table(batch, str(fpath), row_group_size=100)
+            parquet_paths.append(str(fpath))
+            offset += n_rows
+
+        rank_table.add_files([f"file://{p}" for p in parquet_paths])
+
+        # Collect row_ids for each rank
+        num_ranks = 3
+        rank_row_ids: dict[int, list[int]] = {}
+        for r in range(num_ranks):
+            _, dataset = IcebergDataset.create_dataloader(
+                table="e2e.rank_test_table",
+                catalog_config=catalog_config,
+                num_workers=1,
+                num_ranks=num_ranks,
+                rank=r,
+            )
+            mock_info = MagicMock()
+            mock_info.id = 0
+            ids: list[int] = []
+            with patch("torch.utils.data.get_worker_info", return_value=mock_info):
+                for batch in dataset:
+                    ids.extend(batch["row_id"].tolist())
+            rank_row_ids[r] = ids
+
+        all_ids = rank_row_ids[0] + rank_row_ids[1] + rank_row_ids[2]
+        all_ids_set = set(all_ids)
+
+        ok_union = check(
+            "union of all ranks = all 2200 rows",
+            len(all_ids_set) == total_rows and all_ids_set == set(range(total_rows)),
+            f"got {len(all_ids_set)} unique ids, expected {total_rows}",
+        )
+        ok_no_dup = check(
+            "no duplicates across ranks",
+            len(all_ids) == total_rows,
+            f"total collected {len(all_ids)}, expected {total_rows}",
+        )
+        counts = [len(rank_row_ids[r]) for r in range(num_ranks)]
+        ok_balance = check(
+            "each rank got roughly equal rows (max - min <= 200)",
+            max(counts) - min(counts) <= 200,
+            f"counts per rank: {counts}",
+        )
+
+        return ok_union and ok_no_dup and ok_balance
+
+    finally:
+        shutil.rmtree(tmp_files_dir, ignore_errors=True)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -335,6 +407,7 @@ def main() -> int:
         results.append(run_multi_epoch_shuffle(catalog_config))
         results.append(run_multi_worker(catalog_config, args.num_workers, total_rows))
         results.append(run_snapshot_time_travel(catalog, catalog_config))
+        results.append(run_rank_aware_sharding(catalog, catalog_config))
 
     print(f"\n{'=' * 60}")
     passed = sum(results)

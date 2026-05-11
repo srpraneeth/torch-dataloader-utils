@@ -1,15 +1,18 @@
 """
-Generate synthetic Parquet test data for e2e pipeline testing.
+Generate synthetic Parquet and/or ORC test data for e2e pipeline testing.
 
 Usage:
     uv run python e2e/gen_data.py --out-dir /tmp/e2e_data --files 20 --rows 100000
     uv run python e2e/gen_data.py --out-dir /tmp/e2e_data --files 5 --rows 10000 --unequal
+    uv run python e2e/gen_data.py --out-dir /tmp/e2e_orc --files 5 --rows 10000 --format orc
+    uv run python e2e/gen_data.py --out-dir /tmp/e2e_both --files 5 --rows 10000 --format both
 """
 
 import argparse
 import os
 
 import pyarrow as pa
+import pyarrow.orc as orc_mod
 import pyarrow.parquet as pq
 
 
@@ -36,7 +39,7 @@ def _schema() -> pa.Schema:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out-dir", default="/tmp/e2e_data")
-    parser.add_argument("--files", type=int, default=20, help="Number of Parquet files")
+    parser.add_argument("--files", type=int, default=20, help="Number of files")
     parser.add_argument("--rows", type=int, default=100_000, help="Rows per file (base)")
     parser.add_argument(
         "--unequal",
@@ -44,9 +47,24 @@ def main():
         help="Make files very unequal in size (tests worker balance)",
     )
     parser.add_argument("--row-group-size", type=int, default=10_000)
+    parser.add_argument(
+        "--format",
+        choices=["parquet", "orc", "both"],
+        default="parquet",
+        help="Output format(s) to generate (default: parquet)",
+    )
+    parser.add_argument(
+        "--stripe-size",
+        type=int,
+        default=10 * 1024 * 1024,
+        help="ORC stripe size in bytes (default: 10 MiB)",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
+
+    write_parquet = args.format in ("parquet", "both")
+    write_orc = args.format in ("orc", "both")
 
     total = 0
     for i in range(args.files):
@@ -57,10 +75,18 @@ def main():
         else:
             n_rows = args.rows
 
-        path = os.path.join(args.out_dir, f"part_{i:04d}.parquet")
         table = make_table(n_rows, row_id_offset=total, row_group_size=args.row_group_size)
-        pq.write_table(table, path, row_group_size=args.row_group_size)
-        print(f"  wrote {path}  rows={n_rows:,}  size={os.path.getsize(path):,} bytes")
+
+        if write_parquet:
+            path = os.path.join(args.out_dir, f"part_{i:04d}.parquet")
+            pq.write_table(table, path, row_group_size=args.row_group_size)
+            print(f"  wrote {path}  rows={n_rows:,}  size={os.path.getsize(path):,} bytes")
+
+        if write_orc:
+            path = os.path.join(args.out_dir, f"part_{i:04d}.orc")
+            orc_mod.write_table(table, path, stripe_size=args.stripe_size)
+            print(f"  wrote {path}  rows={n_rows:,}  size={os.path.getsize(path):,} bytes")
+
         total += n_rows
 
     print(f"\nTotal rows: {total:,}  across {args.files} files  → {args.out_dir}")

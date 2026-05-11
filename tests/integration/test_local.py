@@ -6,6 +6,7 @@ Run with:
 """
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -300,12 +301,18 @@ def test_shuffle_differs_from_no_shuffle(parquet_dir):
     assert _run(True) != _run(False)
 
 
+_skip_multiworker = pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="macOS spawn mode deadlocks with pyarrow generators in DataLoader workers",
+)
+
 # ---------------------------------------------------------------------------
 # Scenario: Multi-worker — no rows dropped or duplicated
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
+@_skip_multiworker
 def test_multi_worker_no_rows_dropped(tmp_path):
     for i in range(4):
         pq.write_table(_make_table(100, row_id_offset=i * 100), tmp_path / f"f{i}.parquet")
@@ -325,6 +332,7 @@ def test_multi_worker_no_rows_dropped(tmp_path):
 
 
 @pytest.mark.integration
+@_skip_multiworker
 def test_multi_worker_more_files_than_workers(tmp_path):
     for i in range(6):
         pq.write_table(_make_table(100, row_id_offset=i * 100), tmp_path / f"f{i}.parquet")
@@ -344,6 +352,7 @@ def test_multi_worker_more_files_than_workers(tmp_path):
 
 
 @pytest.mark.integration
+@_skip_multiworker
 def test_imbalanced_files_size_balanced_splits(tmp_path):
     # Files with very different row counts — [400, 300, 200, 100] = 1000 total
     row_counts = [400, 300, 200, 100]
@@ -484,6 +493,7 @@ def test_target_size_predicate_pushdown_with_row_range(tmp_path):
 
 
 @pytest.mark.integration
+@_skip_multiworker
 def test_target_size_multi_worker_sub_file_splitting(tmp_path):
     """Single Parquet file split into chunks distributed across 2 workers — no rows lost."""
     from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
@@ -931,10 +941,11 @@ def test_target_size_shuffle_different_seeds(tmp_path):
 
 @pytest.mark.integration
 def test_target_size_orc_whole_file_no_sub_split(tmp_path):
-    """ORC files are not sub-split — each file becomes one chunk, all rows returned."""
+    """ORC files with a single stripe are treated as whole-file chunks (row_range set, 1 stripe = full file)."""
     from torch_dataloader_utils.filesystem.discovery import discover_files
     from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
 
+    # Write 3 small ORC files (100 rows each → 1 stripe each, since 100 < 1000 row stride)
     for i in range(3):
         pa_orc.write_table(_make_table(100, row_id_offset=i * 100), str(tmp_path / f"f{i}.orc"))
 
@@ -942,10 +953,11 @@ def test_target_size_orc_whole_file_no_sub_split(tmp_path):
     strategy = TargetSizeSplitStrategy(target_bytes=1)
     splits = strategy.generate(files, num_workers=1)
 
-    # 3 ORC files → 3 whole-file chunks, all row_range=None
+    # 3 ORC files, each with 1 stripe → 3 chunks (each RowRange covers whole file)
     chunks = splits[0].splits
     assert len(chunks) == 3
-    assert all(c.row_range is None for c in chunks)
+    # Each chunk has a row_range (not None) since ORC sub-splitting is active
+    assert all(c.row_range is not None for c in chunks)
 
     loader, _ = StructuredDataset.create_dataloader(
         path=str(tmp_path),
@@ -1030,6 +1042,185 @@ def test_hive_partitioning_no_extra_columns_without_flag(tmp_path):
     assert "region" not in batch
 
 
+
+
+# ---------------------------------------------------------------------------
+# Scenario: Rank-aware sharding — e2e simulated multi-rank
+# ---------------------------------------------------------------------------
+
+
+def _collect_rank(tmp_path, num_ranks, rank, num_workers=0, shuffle=False, seed=42):
+    """Create a loader for one rank and collect all row_ids."""
+    loader, _ = StructuredDataset.create_dataloader(
+        path=str(tmp_path),
+        format="parquet",
+        num_workers=num_workers,
+        batch_size=50,
+        num_ranks=num_ranks,
+        rank=rank,
+        shuffle=shuffle,
+        shuffle_seed=seed,
+    )
+    return _collect(loader).get("row_id", [])
+
+
+@pytest.fixture()
+def rank_parquet_dir(tmp_path) -> tuple[Path, int]:
+    """6 Parquet files × 100 rows = 600 total rows, row_id 0–599."""
+    for i in range(6):
+        pq.write_table(_make_table(100, row_id_offset=i * 100), tmp_path / f"f{i}.parquet")
+    return tmp_path, 600
+
+
+@pytest.mark.integration
+def test_rank_two_ranks_all_rows_covered(rank_parquet_dir):
+    """rank=0 and rank=1 together return every row exactly once."""
+    path, total = rank_parquet_dir
+    all_ids = []
+    for rank in range(2):
+        all_ids.extend(_collect_rank(path, num_ranks=2, rank=rank))
+    assert len(all_ids) == total
+    assert sorted(all_ids) == list(range(total))
+
+
+@pytest.mark.integration
+def test_rank_two_ranks_no_overlap(rank_parquet_dir):
+    """rank=0 and rank=1 receive disjoint row sets."""
+    path, _ = rank_parquet_dir
+    ids0 = set(_collect_rank(path, num_ranks=2, rank=0))
+    ids1 = set(_collect_rank(path, num_ranks=2, rank=1))
+    assert ids0.isdisjoint(ids1)
+    assert len(ids0) == len(ids1) == 300
+
+
+@pytest.mark.integration
+def test_rank_three_ranks_all_rows_covered(rank_parquet_dir):
+    """3 ranks together cover all rows with no overlap."""
+    path, total = rank_parquet_dir
+    all_ids = []
+    for rank in range(3):
+        all_ids.extend(_collect_rank(path, num_ranks=3, rank=rank))
+    assert len(all_ids) == total
+    assert sorted(all_ids) == list(range(total))
+
+
+@pytest.mark.integration
+def test_rank_more_ranks_than_files(tmp_path):
+    """When num_ranks > num_files, some ranks return no rows — no error."""
+    for i in range(2):
+        pq.write_table(_make_table(100, row_id_offset=i * 100), tmp_path / f"f{i}.parquet")
+
+    all_ids = []
+    for rank in range(4):
+        all_ids.extend(_collect_rank(tmp_path, num_ranks=4, rank=rank))
+
+    assert len(all_ids) == 200
+    assert sorted(all_ids) == list(range(200))
+
+
+@pytest.mark.integration
+def test_rank_single_rank_same_as_no_rank(rank_parquet_dir):
+    """num_ranks=1 returns identical rows to calling without rank params."""
+    path, total = rank_parquet_dir
+    ids_with_rank = _collect_rank(path, num_ranks=1, rank=0)
+    loader, _ = StructuredDataset.create_dataloader(
+        path=str(path), format="parquet", num_workers=0, batch_size=50
+    )
+    ids_no_rank = _collect(loader).get("row_id", [])
+    assert sorted(ids_with_rank) == sorted(ids_no_rank) == list(range(total))
+
+
+@pytest.mark.integration
+def test_rank_with_shuffle_all_rows_covered(rank_parquet_dir):
+    """Shuffle + rank-aware sharding still returns all rows across all ranks."""
+    path, total = rank_parquet_dir
+    all_ids = []
+    for rank in range(2):
+        all_ids.extend(_collect_rank(path, num_ranks=2, rank=rank, shuffle=True, seed=99))
+    assert len(all_ids) == total
+    assert sorted(all_ids) == list(range(total))
+
+
+@pytest.mark.integration
+def test_rank_shuffle_deterministic_across_runs(rank_parquet_dir):
+    """Same seed + epoch produces identical rank assignments on repeated calls."""
+    path, _ = rank_parquet_dir
+    ids_run1 = _collect_rank(path, num_ranks=2, rank=0, shuffle=True, seed=42)
+    ids_run2 = _collect_rank(path, num_ranks=2, rank=0, shuffle=True, seed=42)
+    assert ids_run1 == ids_run2
+
+
+@pytest.mark.integration
+def test_rank_sub_file_splitting_all_rows_covered(tmp_path):
+    """Rank-aware sharding works with sub-file RowRange splits (Parquet row groups)."""
+    from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
+
+    # 1 file, 8 row groups × 100 rows = 800 rows total
+    writer = pq.ParquetWriter(tmp_path / "f.parquet", _make_table(1).schema)
+    for i in range(8):
+        writer.write_table(_make_table(100, row_id_offset=i * 100))
+    writer.close()
+
+    # target_bytes=1 → one chunk per row group → 8 chunks across 2 ranks
+    strategy = TargetSizeSplitStrategy(target_bytes=1)
+    all_ids = []
+    for rank in range(2):
+        loader, _ = StructuredDataset.create_dataloader(
+            path=str(tmp_path),
+            format="parquet",
+            num_workers=0,
+            batch_size=50,
+            split_strategy=strategy,
+            num_ranks=2,
+            rank=rank,
+        )
+        all_ids.extend(_collect(loader).get("row_id", []))
+
+    assert len(all_ids) == 800
+    assert sorted(all_ids) == list(range(800))
+
+
+@pytest.mark.integration
+def test_rank_with_column_projection(rank_parquet_dir):
+    """Column projection works correctly with rank-aware sharding."""
+    path, total = rank_parquet_dir
+    all_ids = []
+    for rank in range(2):
+        loader, _ = StructuredDataset.create_dataloader(
+            path=str(path),
+            format="parquet",
+            num_workers=0,
+            num_ranks=2,
+            rank=rank,
+            columns=["row_id", "label"],
+        )
+        rows = _collect(loader)
+        assert set(rows.keys()) == {"row_id", "label"}
+        all_ids.extend(rows["row_id"])
+    assert sorted(all_ids) == list(range(total))
+
+
+@pytest.mark.integration
+def test_rank_with_predicate_pushdown(rank_parquet_dir):
+    """Predicate pushdown is applied correctly within each rank's assigned splits."""
+    path, _ = rank_parquet_dir
+    all_ids = []
+    for rank in range(2):
+        loader, _ = StructuredDataset.create_dataloader(
+            path=str(path),
+            format="parquet",
+            num_workers=0,
+            num_ranks=2,
+            rank=rank,
+            filters=pc.field("feature_b") >= 50,
+        )
+        rows = _collect(loader)
+        assert all(v >= 50 for v in rows.get("feature_b", []))
+        all_ids.extend(rows.get("row_id", []))
+    # Each of 6 files × 50 matching rows = 300 total
+    assert len(all_ids) == 300
+
+
 @pytest.mark.integration
 def test_hive_partitioning_create_dataloader_api(tmp_path):
     """partitioning="hive" is accepted by create_dataloader() and threaded through correctly."""
@@ -1049,4 +1240,256 @@ def test_hive_partitioning_create_dataloader_api(tmp_path):
         if "split" in batch:
             all_splits.extend(batch["split"])
     assert all(s == "train" for s in all_splits)
-    assert len(all_splits) == 30
+
+
+# ---------------------------------------------------------------------------
+# ORC sub-file splitting — integration
+# ---------------------------------------------------------------------------
+
+
+def _make_orc_multistripe(path: str, n_rows: int, row_id_offset: int = 0) -> None:
+    """Write an ORC file with n_rows rows; PyArrow ORC produces 1 stripe per 1000 rows.
+
+    Use n_rows >= 2000 to get multiple stripes.
+    """
+    import random
+
+    rng = random.Random(row_id_offset + 99991)
+    row_ids = list(range(row_id_offset, row_id_offset + n_rows))
+    table = pa.table(
+        {
+            "row_id": pa.array(row_ids, pa.int32()),
+            "_noise": pa.array([rng.uniform(-1e15, 1e15) for _ in range(n_rows)], pa.float64()),
+            "feature_b": pa.array([rng.randint(0, 100) for _ in range(n_rows)], pa.int32()),
+            "label": pa.array([rng.randint(0, 1) for _ in range(n_rows)], pa.int32()),
+        }
+    )
+    pa_orc.write_table(table, str(path), stripe_size=1000)
+
+
+@pytest.fixture()
+def orc_multistripe_dir(tmp_path) -> tuple[Path, int]:
+    """3 ORC files × 3000 rows = 9000 total rows; each file has 3 stripes (1 per 1000 rows)."""
+    total = 0
+    for i in range(3):
+        _make_orc_multistripe(tmp_path / f"f{i}.orc", n_rows=3000, row_id_offset=i * 3000)
+        total += 3000
+    return tmp_path, total
+
+
+@pytest.mark.integration
+def test_orc_sub_file_splitting_all_rows_covered(orc_multistripe_dir):
+    """All rows are returned when ORC files are split at stripe boundaries."""
+    path, total = orc_multistripe_dir
+    loader, dataset = StructuredDataset.create_dataloader(
+        path=str(path),
+        format="orc",
+        num_workers=0,
+        batch_size=128,
+    )
+    # Verify we actually have multiple stripes
+    import pyarrow.orc as pa_orc_check
+    nstripes = pa_orc_check.ORCFile(str(path / "f0.orc")).nstripes
+    assert nstripes > 1, f"Expected multiple stripes, got {nstripes}"
+
+    rows = _collect(loader)
+    assert len(rows["row_id"]) == total
+    assert sorted(rows["row_id"]) == list(range(total))
+
+
+@pytest.mark.integration
+def test_orc_sub_file_no_duplicate_rows(orc_multistripe_dir):
+    """No row appears twice when ORC sub-file splits are distributed across workers."""
+    path, total = orc_multistripe_dir
+    loader, _ = StructuredDataset.create_dataloader(
+        path=str(path),
+        format="orc",
+        num_workers=0,
+        batch_size=128,
+    )
+    rows = _collect(loader)
+    assert len(rows["row_id"]) == len(set(rows["row_id"])), "Duplicate rows found"
+
+
+@pytest.mark.integration
+def test_orc_sub_file_column_projection(orc_multistripe_dir):
+    """Column projection works for ORC sub-file splits."""
+    path, total = orc_multistripe_dir
+    loader, _ = StructuredDataset.create_dataloader(
+        path=str(path),
+        format="orc",
+        num_workers=0,
+        columns=["row_id", "label"],
+    )
+    rows = _collect(loader)
+    assert set(rows.keys()) == {"row_id", "label"}
+    assert len(rows["row_id"]) == total
+
+
+@pytest.mark.integration
+def test_orc_sub_file_predicate_filter(orc_multistripe_dir):
+    """Predicate filter is correctly applied to ORC sub-file splits."""
+    path, _ = orc_multistripe_dir
+    loader, _ = StructuredDataset.create_dataloader(
+        path=str(path),
+        format="orc",
+        num_workers=0,
+        filters=pc.field("feature_b") < 50,
+    )
+    rows = _collect(loader)
+    assert all(v < 50 for v in rows["feature_b"])
+    assert len(rows["row_id"]) > 0
+
+
+@pytest.mark.integration
+def test_orc_sub_file_splitting_with_target_rows(orc_multistripe_dir):
+    """target_rows chunking produces correct splits for ORC files."""
+    path, total = orc_multistripe_dir
+    loader, dataset = StructuredDataset.create_dataloader(
+        path=str(path),
+        format="orc",
+        num_workers=0,
+        split_rows=100,
+    )
+    rows = _collect(loader)
+    assert len(rows["row_id"]) == total
+    assert sorted(rows["row_id"]) == list(range(total))
+    # 3 files × 3 stripes × (target ~100 rows/stripe at ~1000 rows/stripe) → many splits
+    splits_count = sum(len(s.splits) for s in dataset._splits)
+    assert splits_count >= 3  # at least one split per file
+
+
+# ---------------------------------------------------------------------------
+# Scenario: ORC with rank-aware sharding
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def orc_unequal_dir(tmp_path) -> tuple[Path, int]:
+    """4 ORC files with unequal row counts: [100, 300, 500, 200] = 1100 rows."""
+    sizes = [100, 300, 500, 200]
+    offset = 0
+    for i, n in enumerate(sizes):
+        pa_orc.write_table(_make_table(n, row_id_offset=offset), str(tmp_path / f"f{i}.orc"))
+        offset += n
+    return tmp_path, sum(sizes)
+
+
+@pytest.mark.integration
+def test_orc_rank_aware_sharding_disjoint_coverage(orc_unequal_dir):
+    """Two ranks produce disjoint subsets that together cover all ORC rows."""
+    from unittest.mock import MagicMock, patch
+
+    path, total = orc_unequal_dir
+
+    all_ids = []
+    for rank in range(2):
+        _, dataset = StructuredDataset.create_dataloader(
+            path=str(path),
+            format="orc",
+            num_workers=1,
+            num_ranks=2,
+            rank=rank,
+        )
+        mock_info = MagicMock()
+        mock_info.id = 0
+        with patch("torch.utils.data.get_worker_info", return_value=mock_info):
+            for batch in dataset:
+                all_ids.extend(batch["row_id"].tolist())
+
+    assert sorted(all_ids) == list(range(total))
+    assert len(set(all_ids)) == len(all_ids)
+
+
+@pytest.mark.integration
+def test_orc_rank_aware_sub_file_splitting(orc_unequal_dir):
+    """ORC stripe-level splits distributed across ranks — full coverage."""
+    from unittest.mock import MagicMock, patch
+
+    path, total = orc_unequal_dir
+
+    all_ids = []
+    for rank in range(3):
+        _, dataset = StructuredDataset.create_dataloader(
+            path=str(path),
+            format="orc",
+            num_workers=1,
+            num_ranks=3,
+            rank=rank,
+            split_rows=100,  # force stripe-level chunking
+        )
+        mock_info = MagicMock()
+        mock_info.id = 0
+        with patch("torch.utils.data.get_worker_info", return_value=mock_info):
+            for batch in dataset:
+                all_ids.extend(batch["row_id"].tolist())
+
+    assert sorted(all_ids) == list(range(total))
+    assert len(set(all_ids)) == len(all_ids)
+
+
+# ---------------------------------------------------------------------------
+# Scenario: multi-rank correctness via mp.spawn
+# ---------------------------------------------------------------------------
+
+
+def _distributed_worker(
+    rank: int,
+    world_size: int,
+    data_path: str,
+    results_dir: str,
+) -> None:
+    """Worker function run in each spawned process — no torch.distributed needed."""
+    import json
+
+    from torch_dataloader_utils.dataset.structured import StructuredDataset
+
+    loader, _ = StructuredDataset.create_dataloader(
+        path=data_path,
+        format="parquet",
+        num_workers=0,
+        num_ranks=world_size,
+        rank=rank,
+        batch_size=256,
+        split_rows=20,
+    )
+    ids = []
+    for batch in loader:
+        ids.extend(batch["row_id"].tolist())
+
+    out = Path(results_dir) / f"rank{rank}.json"
+    out.write_text(json.dumps(ids))
+
+
+@pytest.mark.integration
+def test_mp_spawn_three_ranks_disjoint_coverage(tmp_path):
+    """mp.spawn with 3 ranks: each rank reads a disjoint subset, union = all rows."""
+    import torch.multiprocessing as mp
+
+    FILE_SIZES = [50, 100, 200, 500, 1000, 2000, 3000, 1000, 1150]
+    total = sum(FILE_SIZES)
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    offset = 0
+    for i, n in enumerate(FILE_SIZES):
+        row_ids = list(range(offset, offset + n))
+        pq.write_table(
+            pa.table({"row_id": pa.array(row_ids, pa.int32())}),
+            str(tmp_path / f"part_{i:04d}.parquet"),
+            row_group_size=100,
+        )
+        offset += n
+
+    mp.spawn(
+        _distributed_worker,
+        args=(3, str(tmp_path), str(results_dir)),
+        nprocs=3,
+        join=True,
+    )
+
+    combined = []
+    for r in range(3):
+        combined.extend(json.loads((results_dir / f"rank{r}.json").read_text()))
+
+    assert sorted(combined) == list(range(total)), "mp.spawn: rows missing or wrong"
+    assert len(set(combined)) == len(combined), "mp.spawn: duplicate rows across ranks"

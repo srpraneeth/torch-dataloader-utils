@@ -70,37 +70,12 @@ The system SHALL log at `DEBUG` level: each discovered file path and size.
 
 ## Scenarios
 
-#### Scenario: Directory discovery
-- GIVEN a directory containing 5 Parquet files
-- WHEN `discover_files(path)` is called
-- THEN all 5 files are returned as DataFileInfo with file_size populated
-
-#### Scenario: Glob pattern
-- GIVEN a glob `s3://bucket/data/*.parquet` matching 3 files
-- WHEN `discover_files(path)` is called
-- THEN exactly 3 DataFileInfo objects are returned
-
-#### Scenario: Single file
-- GIVEN a direct file path `s3://bucket/data/f1.parquet`
-- WHEN `discover_files(path)` is called
-- THEN exactly 1 DataFileInfo is returned
-
-#### Scenario: Empty directory
-- GIVEN a directory containing no files
-- WHEN `discover_files(path)` is called
-- THEN an empty list is returned — no error raised
-
-#### Scenario: Path does not exist
-- GIVEN a path that does not exist on the filesystem
-- WHEN `discover_files(path)` is called
-- THEN a FileNotFoundError is raised with the path in the message
-
-#### Scenario: Extension filtering
-- GIVEN a directory with 3 .parquet and 2 .csv files
-- WHEN `discover_files(path, extensions=[".parquet"])` is called
-- THEN only the 3 Parquet files are returned
-
-#### Scenario: Missing optional backend
-- GIVEN an `s3://` path and `s3fs` is not installed
-- WHEN `discover_files(path)` is called
-- THEN an ImportError is raised with: `pip install torch-dataloader-utils[s3]`
+| Path input | Setup | Expected |
+|------------|-------|----------|
+| Directory | 5 Parquet files in dir | 5 `DataFileInfo` returned with `file_size` populated |
+| Glob | `s3://bucket/data/*.parquet` matching 3 files | Exactly 3 `DataFileInfo` returned |
+| Single file | `s3://bucket/data/f1.parquet` | Exactly 1 `DataFileInfo` returned |
+| Empty directory | Directory with no files | Empty list — no error |
+| Path not found | Non-existent path | `FileNotFoundError` with path in message |
+| Extension filter | 3 `.parquet` + 2 `.csv`, `extensions=[".parquet"]` | Only 3 Parquet files returned |
+| Missing backend | `s3://` path, `s3fs` not installed | `ImportError` with `pip install torch-dataloader-utils[s3]` |

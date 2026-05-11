@@ -494,3 +494,135 @@ def test_get_arrow_filesystem_local_returns_none():
     arrow_fs, resolved = _get_arrow_filesystem("/tmp/data.parquet", {})
     assert arrow_fs is None
     assert resolved == "/tmp/data.parquet"
+
+
+# ---------------------------------------------------------------------------
+# Scenario: _read_orc_row_range — stripe-level random access
+# ---------------------------------------------------------------------------
+
+
+def _make_orc_multi_stripe(path: str, num_rows: int = 3000, stripe_size: int = 1000) -> None:
+    """Write an ORC file with random float64 data.
+
+    PyArrow's ORC writer creates one stripe per 1000 rows (row index stride),
+    so num_rows >= 2000 is required to produce multiple stripes.
+    """
+    import random
+
+    import pyarrow.orc as pa_orc_w
+
+    rng = random.Random(42)
+    table = pa.table(
+        {
+            "a": pa.array(list(range(num_rows)), pa.int32()),
+            "b": pa.array([rng.uniform(-1e15, 1e15) for _ in range(num_rows)], pa.float64()),
+        }
+    )
+    pa_orc_w.write_table(table, path, stripe_size=stripe_size)
+
+
+def _shard_orc_row_range(path: str, offset: int, length: int) -> "Shard":
+    from torch_dataloader_utils.splits.core import RowRange
+
+    return Shard(
+        id=0,
+        splits=[Split(file=DataFileInfo(path=path), row_range=RowRange(offset=offset, length=length))],
+    )
+
+
+def test_orc_row_range_full_file(tmp_path):
+    """RowRange covering the full file returns all rows."""
+    import pyarrow.orc as pa_orc
+
+    path = str(tmp_path / "f.orc")
+    _make_orc_multi_stripe(path)  # 3000 rows → 3 stripes
+    orf = pa_orc.ORCFile(path)
+    nrows = orf.nrows
+
+    shard = _shard_orc_row_range(path, offset=0, length=nrows)
+    batches = list(read_split(shard, format="orc"))
+    total = sum(b.num_rows for b in batches)
+    assert total == nrows
+
+
+def test_orc_row_range_no_rows_dropped_across_two_halves(tmp_path):
+    """Two complementary RowRanges together return all rows without duplicates."""
+    import pyarrow.orc as pa_orc
+
+    path = str(tmp_path / "f.orc")
+    _make_orc_multi_stripe(path)  # 3000 rows → 3 stripes
+    orf = pa_orc.ORCFile(path)
+    nrows = orf.nrows
+    nstripes = orf.nstripes
+    assert nstripes > 1, "Need multiple stripes for this test"
+
+    mid_row = round(nstripes // 2 * nrows / nstripes)
+    shard0 = _shard_orc_row_range(path, offset=0, length=mid_row)
+    shard1 = _shard_orc_row_range(path, offset=mid_row, length=nrows - mid_row)
+
+    rows0 = sum(b.num_rows for b in read_split(shard0, format="orc"))
+    rows1 = sum(b.num_rows for b in read_split(shard1, format="orc"))
+    assert rows0 + rows1 == nrows
+
+
+def test_orc_row_range_column_projection(tmp_path):
+    """Column projection via RowRange path returns only requested columns."""
+    path = str(tmp_path / "f.orc")
+    _make_orc_multi_stripe(path)
+
+    import pyarrow.orc as pa_orc
+
+    nrows = pa_orc.ORCFile(path).nrows
+
+    shard = _shard_orc_row_range(path, offset=0, length=nrows)
+    batches = list(read_split(shard, format="orc", columns=["a"]))
+    assert len(batches) > 0
+    assert batches[0].schema.names == ["a"]
+    assert "b" not in batches[0].schema.names
+
+
+def test_orc_row_range_filter(tmp_path):
+    """Filter applied post-read narrows rows correctly."""
+    path = str(tmp_path / "f.orc")
+    _make_orc_multi_stripe(path)
+
+    import pyarrow.orc as pa_orc
+
+    nrows = pa_orc.ORCFile(path).nrows
+    shard = _shard_orc_row_range(path, offset=0, length=nrows)
+    batches = list(read_split(shard, format="orc", filters=pc.field("a") >= 1500))
+    total = sum(b.num_rows for b in batches)
+    assert total == 1500  # rows 1500–2999
+
+
+def test_orc_row_range_batch_size(tmp_path):
+    """batch_size is respected for ORC row-range reads."""
+    path = str(tmp_path / "f.orc")
+    _make_orc_multi_stripe(path)
+
+    import pyarrow.orc as pa_orc
+
+    nrows = pa_orc.ORCFile(path).nrows
+    shard = _shard_orc_row_range(path, offset=0, length=nrows)
+    batches = list(read_split(shard, format="orc", batch_size=200))
+    assert all(b.num_rows <= 200 for b in batches)
+
+
+def test_orc_row_range_hive_partitioning(tmp_path):
+    """Hive partition columns are attached for ORC row-range reads."""
+    partitioned_dir = tmp_path / "region=us" / "year=2024"
+    partitioned_dir.mkdir(parents=True)
+    path = str(partitioned_dir / "part.orc")
+    _make_orc_multi_stripe(path)
+
+    import pyarrow.orc as pa_orc
+
+    nrows = pa_orc.ORCFile(path).nrows
+    shard = _shard_orc_row_range(path, offset=0, length=nrows)
+    batches = list(read_split(shard, format="orc", partitioning="hive"))
+    assert len(batches) > 0
+    names = set(batches[0].schema.names)
+    assert "region" in names
+    assert "year" in names
+    assert all(r == "us" for r in batches[0].column("region").to_pylist())
+

@@ -415,8 +415,114 @@ def test_torch_output_with_collate_fn_does_not_raise():
 
 
 # ---------------------------------------------------------------------------
-# _auto_select_strategy — empty files → RoundRobinSplitStrategy (lines 27-28)
+# Rank-aware sharding — StructuredDataset wiring
 # ---------------------------------------------------------------------------
+
+
+def test_rank_params_passed_to_strategy(tmp_path):
+    """num_ranks and rank are stored on the dataset and produce a rank-partitioned split."""
+    t = pa.table({"val": pa.array([1, 2], type=pa.int32())})
+    for i in range(6):
+        pq.write_table(t, tmp_path / f"f{i}.parquet")
+    files = _make_files(*[str(tmp_path / f"f{i}.parquet") for i in range(6)])
+
+    ds = StructuredDataset(files=files, format="parquet", num_workers=1, num_ranks=3, rank=2)
+    assert ds._num_ranks == 3
+    assert ds._rank == 2
+    # rank=2 of 3 should get 2 splits (files [2, 5] via interleaved slice)
+    total_splits = sum(len(s.splits) for s in ds._splits)
+    assert total_splits == 2
+
+
+def test_rank_default_values_identical_to_v1(tmp_path):
+    """Default num_ranks=1, rank=0 produces same splits as V1 (no rank params)."""
+    t = pa.table({"val": pa.array([1, 2], type=pa.int32())})
+    for i in range(4):
+        pq.write_table(t, tmp_path / f"f{i}.parquet")
+    files = _make_files(*[str(tmp_path / f"f{i}.parquet") for i in range(4)])
+
+    ds_v1 = StructuredDataset(files=files, format="parquet", num_workers=2)
+    ds_r0 = StructuredDataset(files=files, format="parquet", num_workers=2, num_ranks=1, rank=0)
+
+    counts_v1 = [len(s.splits) for s in ds_v1._splits]
+    counts_r0 = [len(s.splits) for s in ds_r0._splits]
+    assert counts_v1 == counts_r0
+
+
+def test_rank_two_ranks_disjoint_splits(tmp_path):
+    """rank=0 and rank=1 receive disjoint file sets."""
+    t = pa.table({"val": pa.array([1, 2], type=pa.int32())})
+    for i in range(6):
+        pq.write_table(t, tmp_path / f"f{i}.parquet")
+    files = _make_files(*[str(tmp_path / f"f{i}.parquet") for i in range(6)])
+
+    ds0 = StructuredDataset(files=files, format="parquet", num_workers=1, num_ranks=2, rank=0)
+    ds1 = StructuredDataset(files=files, format="parquet", num_workers=1, num_ranks=2, rank=1)
+
+    paths0 = {sp.file.path for shard in ds0._splits for sp in shard.splits}
+    paths1 = {sp.file.path for shard in ds1._splits for sp in shard.splits}
+    assert paths0.isdisjoint(paths1)
+    assert len(paths0) + len(paths1) == 6
+
+
+def test_rank_union_covers_all_files(tmp_path):
+    """Union of splits across all ranks equals the full file set."""
+    t = pa.table({"val": pa.array([1, 2], type=pa.int32())})
+    for i in range(9):
+        pq.write_table(t, tmp_path / f"f{i}.parquet")
+    files = _make_files(*[str(tmp_path / f"f{i}.parquet") for i in range(9)])
+
+    all_paths = set()
+    for rank in range(3):
+        ds = StructuredDataset(
+            files=files, format="parquet", num_workers=1, num_ranks=3, rank=rank
+        )
+        for shard in ds._splits:
+            for sp in shard.splits:
+                all_paths.add(sp.file.path)
+
+    assert len(all_paths) == 9
+
+
+def test_rank_backward_compat_custom_strategy_without_rank_params(tmp_path):
+    """A custom strategy with only the V1 generate() signature still works."""
+    from torch_dataloader_utils.splits.core import DataFileInfo, Shard, Split
+
+    class V1Strategy:
+        def generate(self, files: list[DataFileInfo], num_workers: int, epoch: int = 0):
+            shards = [Shard(id=i) for i in range(num_workers)]
+            for i, f in enumerate(files):
+                shards[i % num_workers].splits.append(Split(file=f))
+            return shards
+
+    t = pa.table({"val": pa.array([1, 2], type=pa.int32())})
+    for i in range(4):
+        pq.write_table(t, tmp_path / f"f{i}.parquet")
+    files = _make_files(*[str(tmp_path / f"f{i}.parquet") for i in range(4)])
+
+    # Should not raise even though strategy has no num_ranks/rank params
+    ds = StructuredDataset(
+        files=files,
+        format="parquet",
+        num_workers=2,
+        split_strategy=V1Strategy(),
+        num_ranks=2,
+        rank=0,
+    )
+    assert len(ds._splits) == 2
+
+
+def test_create_dataloader_passes_rank_params():
+    """create_dataloader() num_ranks/rank are wired through to the dataset."""
+    loader, dataset = StructuredDataset.create_dataloader(
+        path=str(FIXTURES),
+        format="parquet",
+        num_workers=0,
+        num_ranks=2,
+        rank=1,
+    )
+    assert dataset._num_ranks == 2
+    assert dataset._rank == 1
 
 
 def test_auto_select_strategy_empty_files_returns_round_robin():
@@ -434,6 +540,34 @@ def test_structured_dataset_empty_files_uses_round_robin():
 
     ds = StructuredDataset(files=[], format="parquet", num_workers=1)
     assert isinstance(ds._strategy, RoundRobinSplitStrategy)
+
+
+def test_auto_select_strategy_with_split_bytes(tmp_path):
+    """_auto_select_strategy passes split_bytes through to TargetSizeSplitStrategy."""
+    from torch_dataloader_utils.dataset.structured import _auto_select_strategy
+    from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy
+
+    t = pa.table({"x": pa.array([1], pa.int32())})
+    pq.write_table(t, tmp_path / "f.parquet")
+    files = _make_files(str(tmp_path / "f.parquet"))
+
+    strategy = _auto_select_strategy(files, shuffle=False, shuffle_seed=42, split_bytes="64MiB")
+    assert isinstance(strategy, TargetSizeSplitStrategy)
+    assert strategy.target_bytes == 64 * 1024 * 1024
+
+
+def test_filters_wrong_type_raises_type_error():
+    """Passing a non-pc.Expression as filters raises TypeError at construction."""
+    files = _make_files(str(FIXTURES / "sample.parquet"))
+    with pytest.raises(TypeError, match="pc.Expression"):
+        StructuredDataset(files=files, format="parquet", filters="a > 0")
+
+
+def test_filters_dict_raises_type_error():
+    """Passing a dict as filters raises TypeError."""
+    files = _make_files(str(FIXTURES / "sample.parquet"))
+    with pytest.raises(TypeError, match="pc.Expression"):
+        StructuredDataset(files=files, format="parquet", filters={"a": 1})
 
 
 # ---------------------------------------------------------------------------

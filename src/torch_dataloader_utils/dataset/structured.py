@@ -1,3 +1,4 @@
+import inspect
 import logging
 import os
 from collections.abc import Callable, Iterator
@@ -70,6 +71,8 @@ class StructuredDataset(IterableDataset):
         storage_options: dict | None = None,
         collate_fn: Callable | None = None,
         partitioning: str | None = None,
+        num_ranks: int = 1,
+        rank: int = 0,
     ) -> None:
         if format not in SUPPORTED_FORMATS:
             supported = ", ".join(sorted(SUPPORTED_FORMATS))
@@ -108,6 +111,8 @@ class StructuredDataset(IterableDataset):
         self._storage_options = storage_options
         self._collate_fn = collate_fn
         self._partitioning = partitioning
+        self._num_ranks = num_ranks
+        self._rank = rank
 
         # Splits are generated in the main process and stored as immutable data.
         # Workers receive a pickled copy — __iter__ only reads, never writes.
@@ -116,6 +121,15 @@ class StructuredDataset(IterableDataset):
 
     def _generate_splits(self) -> list[Shard]:
         n = max(self._num_workers, 1)
+        sig = inspect.signature(self._strategy.generate)
+        if "num_ranks" in sig.parameters:
+            return self._strategy.generate(
+                self._files,
+                num_workers=n,
+                epoch=self._epoch,
+                num_ranks=self._num_ranks,
+                rank=self._rank,
+            )
         return self._strategy.generate(self._files, num_workers=n, epoch=self._epoch)
 
     def set_epoch(self, epoch: int) -> None:
@@ -196,6 +210,8 @@ class StructuredDataset(IterableDataset):
         storage_options: dict | None = None,
         collate_fn: Callable | None = None,
         partitioning: str | None = None,
+        num_ranks: int = 1,
+        rank: int = 0,
     ) -> tuple[DataLoader, "StructuredDataset"]:
         """Create a DataLoader for structured files at the given path.
 
@@ -253,6 +269,8 @@ class StructuredDataset(IterableDataset):
             storage_options=storage_options,
             collate_fn=collate_fn,
             partitioning=partitioning,
+            num_ranks=num_ranks,
+            rank=rank,
         )
 
         # For non-torch output formats, PyTorch's default collate would convert

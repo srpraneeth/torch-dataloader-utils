@@ -376,11 +376,14 @@ Pyarrow `pc.Expression` predicates (`filters`) are applied as row-level filters 
 ### Iceberg Delete Files
 Iceberg supports row-level deletes via **position delete files** (written by `DELETE` and `MERGE INTO` operations). Reading Parquet data files directly would return deleted rows — pyarrow has no knowledge of Iceberg delete files.
 
-**Solution:** `IcebergDataset` inspects every `FileScanTask` from `scan.plan_files()` at construction time. When delete files are present, it switches to `pyiceberg.io.pyarrow.ArrowScan` per file task — ArrowScan applies position deletes before yielding batches. When no delete files exist, it uses the direct pyarrow reader (faster, with sub-file row-range splitting active).
+**Solution:** `IcebergDataset` inspects every `FileScanTask` from `scan.plan_files()` at construction time. When delete files are present, it switches to `pyiceberg.io.pyarrow.ArrowScan` per file task — ArrowScan reads both the data file and the position delete file, builds an in-memory row mask, and filters before yielding batches. When no delete files exist, the direct pyarrow reader is used (faster, sub-file splitting active).
 
 **Limitations:**
-- **Equality deletes** are not supported by pyiceberg and will raise `NotImplementedError`. Compact the table first.
-- **Sub-file splitting is disabled** when delete files are present — position delete offsets reference absolute row positions in the original file, not in a sub-range slice.
+- **Two file reads per data file** — data file + delete file, more I/O than clean tables.
+- **Worker reconnects to catalog per file** — catalog round-trip overhead in every worker for every file, not just once at startup.
+- **Sub-file splitting disabled** — position delete offsets are absolute row positions in the original file; splitting at row group boundaries would silently miss deletes in other sub-ranges.
+- **Equality deletes not supported** — `pyiceberg` raises `NotImplementedError`. Compact the table first (`CALL system.rewrite_data_files(...)`).
+- **TOCTOU** — delete files detected at construction time; new deletes committed after `create_dataloader()` returns are missed for that instance.
 
 ### Iceberg Catalog Diversity
 Iceberg supports REST, Glue, Hive, and JDBC catalogs — each with different config shapes. The library passes `catalog_config` directly to `pyiceberg` without interpretation, so catalog compatibility is delegated to `pyiceberg` rather than re-implemented here.

@@ -35,17 +35,48 @@ Text formats have no footer metadata and no seek-friendly internal structure. Mu
 
 If you have a few very large CSV or JSONL files, split them into smaller files (128–512 MiB each) to give the strategy enough chunks to distribute evenly.
 
+## Iceberg: Delete Files Require Reading Both Data File and Delete File
+
+When position delete files are present, **two files must be read per data file**:
+
+```
+data_file.parquet      ← all rows including "deleted" ones
+delete_file.parquet    ← list of (file_path, row_position) pairs to exclude
+```
+
+`IcebergDataset` routes through `pyiceberg.io.pyarrow.ArrowScan`, which reads both files, builds an in-memory row-position mask, and filters before yielding batches. This is unavoidable — pyarrow has no knowledge of Iceberg delete files and would return deleted rows if used directly.
+
+**Performance implications:**
+- Each worker reconnects to the Iceberg catalog per file to reconstruct the `FileScanTask` (catalog round-trip per file, not once at startup).
+- I/O is higher than clean tables: every data file read is accompanied by a delete file read.
+- For large tables with many small delete files, this can dominate worker time.
+
+**Workaround:** compact the table before training to merge deletes back into clean data files:
+
+```sql
+-- Spark / Trino / Flink
+ALTER TABLE my_table EXECUTE optimize;
+-- or
+CALL system.rewrite_data_files('my_db.my_table');
+```
+
+After compaction, `_has_deletes` becomes `False` and the fast path (direct pyarrow reader, sub-file splitting active) is restored.
+
 ## Iceberg: Equality Deletes Not Supported
 
 Tables with **equality delete files** (produced by some engines' `DELETE` or `MERGE INTO` operations) will raise `NotImplementedError` from `pyiceberg` — equality deletes are not implemented in the pyiceberg Arrow reader.
 
-**Workaround:** compact the table before training (`ALTER TABLE ... REWRITE DATA FILES`) to produce clean data files with no outstanding deletes.
-
-Position delete files are supported — deleted rows are automatically excluded.
+**Workaround:** compact the table first (same `rewrite_data_files` command above) to convert equality deletes to position deletes, or rewrite to clean files.
 
 ## Iceberg: Sub-File Splitting Disabled with Delete Files
 
-When position delete files are present, `IcebergDataset` reads each data file whole (no row group splitting). Position delete offsets reference absolute row positions in the original file, so splitting at row group boundaries would require reconstructing the delete mask per chunk — not implemented in V1.
+When position delete files are present, `IcebergDataset` falls back to **file-level splits only** — no row group splitting within a file.
+
+**Why:** position delete offsets are absolute row positions within the original data file. If a file is split into sub-ranges (e.g. rows `[0, 1000)` and `[1000, 2000)`), a delete at position 1500 only appears in the second chunk. The worker reading `[0, 1000)` never sees it and silently returns a row that should be deleted.
+
+**Impact:** large data files with delete files cannot be distributed across multiple workers — the entire file is assigned to one worker. For clean tables (no deletes), `TargetSizeSplitStrategy` sub-splits at row group boundaries and each row group can go to a different worker.
+
+**Workaround:** compact the table to remove delete files (see above), or partition large files into smaller ones so the file-level scheduler still distributes work evenly.
 
 ## `arrow` / `dict` Output: Explicit `collate_fn` Required
 

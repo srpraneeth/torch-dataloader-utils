@@ -51,4 +51,6 @@ class SplitStrategy(Protocol):
         files: list[DataFileInfo],
         num_workers: int,
         epoch: int = 0,
+        num_ranks: int = 1,
+        rank: int = 0,
     ) -> list[Shard]: ...

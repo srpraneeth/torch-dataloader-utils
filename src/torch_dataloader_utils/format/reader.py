@@ -7,6 +7,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as pad
 import pyarrow.fs as pafs
+import pyarrow.orc as orc
 import pyarrow.parquet as pq
 
 from torch_dataloader_utils.splits.core import RowRange, Shard
@@ -115,6 +116,17 @@ def read_split(
                 arrow_fs,
                 partitioning,
             )
+        elif split.row_range is not None and arrow_format == "orc":
+            gen = _read_orc_row_range(
+                path,
+                resolved_path,
+                split.row_range,
+                columns,
+                filters,
+                batch_size,
+                arrow_fs,
+                partitioning,
+            )
         else:
             ds = pad.dataset(
                 resolved_path,
@@ -209,10 +221,65 @@ def _read_parquet_row_range(
                 )
 
     # Yield in batch_size chunks
-    offset = 0
-    while offset < len(table):
-        yield table.slice(offset, batch_size).to_batches()[0]
-        offset += batch_size
+    for batch in table.to_batches(max_chunksize=batch_size):
+        if batch.num_rows > 0:
+            yield batch
+
+
+def _read_orc_row_range(
+    original_path: str,
+    resolved_path: str,
+    row_range: RowRange,
+    columns: list[str] | None,
+    filters: pc.Expression | None,
+    batch_size: int,
+    arrow_fs: pafs.FileSystem | None,
+    partitioning: str | None,
+) -> Iterator[pa.RecordBatch]:
+    """Read a RowRange from an ORC file using stripe-level random access.
+
+    Recovers the stripe indices from row_range using the same uniform formula used
+    by _orc_chunks at split-generation time. Reads only the required stripes via
+    read_stripe(); applies filters post-read (ORC has limited predicate pushdown).
+    """
+    kwargs = {"filesystem": arrow_fs} if arrow_fs is not None else {}
+    orf = orc.ORCFile(resolved_path, **kwargs)
+    nstripes = orf.nstripes
+    nrows = orf.nrows
+
+    if nstripes == 0 or nrows == 0:
+        return
+
+    # Recover stripe indices using the same uniform formula as _orc_chunks
+    start_stripe = round(row_range.offset * nstripes / nrows)
+    end_row = row_range.offset + row_range.length
+    end_stripe = nstripes if end_row >= nrows else round(end_row * nstripes / nrows)
+    end_stripe = min(nstripes, max(start_stripe + 1, end_stripe))
+
+    if start_stripe >= nstripes:
+        return
+
+    stripe_batches = [orf.read_stripe(i, columns=columns) for i in range(start_stripe, end_stripe)]
+    if not stripe_batches:
+        return
+
+    table = pa.Table.from_batches(stripe_batches)
+
+    if filters is not None:
+        table = table.filter(filters)
+
+    if partitioning == "hive":
+        hive_parts = _parse_hive_partitions(original_path)
+        for col_name, col_value in hive_parts.items():
+            if col_name not in table.schema.names:
+                table = table.append_column(
+                    col_name,
+                    pa.array([col_value] * len(table), type=pa.string()),
+                )
+
+    for batch in table.to_batches(max_chunksize=batch_size):
+        if batch.num_rows > 0:
+            yield batch
 
 
 def _get_arrow_filesystem(path: str, storage_options: dict) -> tuple[pafs.FileSystem | None, str]:

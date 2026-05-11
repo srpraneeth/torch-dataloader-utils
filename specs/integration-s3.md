@@ -53,44 +53,13 @@ Tests SHALL cover the `PyFileSystem` wrapping path in `format/reader.py`.
 
 ## Scenarios
 
-#### Scenario: S3 directory discovery
-- GIVEN a mocked S3 bucket with 3 Parquet files under `s3://bucket/data/`
-- WHEN `discover_files("s3://bucket/data/", storage_options=moto_opts)` is called
-- THEN 3 DataFileInfo objects are returned with `file_size` populated
-
-#### Scenario: S3 glob pattern
-- GIVEN a mocked S3 bucket with 3 Parquet and 2 CSV files under `s3://bucket/data/`
-- WHEN `discover_files("s3://bucket/data/*.parquet", storage_options=moto_opts)` is called
-- THEN exactly 3 DataFileInfo objects are returned
-
-#### Scenario: S3 single file
-- GIVEN a single Parquet file at `s3://bucket/data/f1.parquet`
-- WHEN `discover_files("s3://bucket/data/f1.parquet", storage_options=moto_opts)` is called
-- THEN exactly 1 DataFileInfo is returned
-
-#### Scenario: S3 end-to-end Parquet read
-- GIVEN a mocked S3 bucket with 2 Parquet files, 100 rows each (200 total)
-- WHEN `create_dataloader(path="s3://bucket/data/", format="parquet", storage_options=moto_opts, num_workers=0)` is called
-- AND the DataLoader is fully iterated
-- THEN total rows collected equals 200
-- AND each batch is a `dict[str, torch.Tensor]`
-
-#### Scenario: S3 column projection
-- GIVEN a mocked S3 Parquet file with columns [feature_a, feature_b, label]
-- WHEN `create_dataloader(..., columns=["feature_a", "label"])` is called
-- THEN each batch contains only keys "feature_a" and "label"
-
-#### Scenario: S3 predicate pushdown
-- GIVEN a mocked S3 Parquet file with feature_b values 0-99
-- WHEN `create_dataloader(..., filters=pc.field("feature_b") >= 50)` is called
-- THEN only rows where feature_b >= 50 are returned
-
-#### Scenario: S3 path does not exist
-- GIVEN a path `s3://bucket/does-not-exist/` that does not exist in the bucket
-- WHEN `discover_files("s3://bucket/does-not-exist/")` is called
-- THEN a `FileNotFoundError` is raised
-
-#### Scenario: S3 no rows dropped or duplicated
-- GIVEN a mocked S3 bucket with 3 Parquet files, 100 rows each (300 total)
-- WHEN `create_dataloader` is fully iterated
-- THEN the set of all row_ids equals exactly {0..299} with no duplicates
+| Scenario | Input | Expected |
+|----------|-------|----------|
+| Directory discovery | 3 Parquet files under `s3://bucket/data/` | 3 `DataFileInfo` with `file_size` populated |
+| Glob pattern | 3 `.parquet` + 2 `.csv`, glob `*.parquet` | Exactly 3 `DataFileInfo` returned |
+| Single file | `s3://bucket/data/f1.parquet` | Exactly 1 `DataFileInfo` returned |
+| End-to-end read | 2 Parquet × 100 rows, `num_workers=0` | 200 rows, each batch is `dict[str, torch.Tensor]` |
+| Column projection | File with `[feature_a, feature_b, label]`, `columns=["feature_a", "label"]` | Each batch contains only those two keys |
+| Predicate pushdown | `feature_b` values 0–99, `filters=pc.field("feature_b") >= 50` | Only rows ≥ 50 returned |
+| Path not found | `s3://bucket/does-not-exist/` | `FileNotFoundError` raised |
+| No rows dropped or duplicated | 3 Parquet × 100 rows, row_id 0–299 | Set of all row_ids equals exactly {0..299} |

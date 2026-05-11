@@ -236,110 +236,50 @@ class IcebergDataset(IterableDataset):
 
 ## Scenarios
 
-#### Scenario: Single-process iteration
-- GIVEN a directory of Parquet files and `num_workers=0`
-- WHEN the DataLoader iterates
-- THEN all rows are yielded as `dict[str, torch.Tensor]`
+**Output formats**
 
-#### Scenario: Multi-worker iteration
-- GIVEN 4 Parquet files and `num_workers=4`
-- WHEN the DataLoader iterates
-- THEN each worker reads exactly 1 file, all rows are returned across workers
+| `output_format` | Numeric column type | Non-numeric column type |
+|-----------------|--------------------|-----------------------|
+| `"torch"` (default) | `torch.Tensor` | `list` |
+| `"numpy"` | `np.ndarray` | `list` |
+| `"arrow"` | `pyarrow.RecordBatch` (whole batch) | — |
+| `"dict"` | `list` | `list` |
 
-#### Scenario: Output format torch
-- GIVEN `output_format="torch"` and a file with numeric and string columns
-- WHEN a batch is yielded
-- THEN numeric columns are `torch.Tensor` and string columns are `list`
+**Construction errors**
 
-#### Scenario: Output format numpy
-- GIVEN `output_format="numpy"` and a file with numeric and string columns
-- WHEN a batch is yielded
-- THEN numeric columns are `np.ndarray` and string columns are `list`
+| Condition | Error |
+|-----------|-------|
+| `format="avro"` | `ValueError` at construction |
+| `output_format="arrow"`, `collate_fn=None` | `ValueError` at construction |
+| `output_format="dict"`, `collate_fn=None` | `ValueError` at construction |
 
-#### Scenario: Output format arrow
-- GIVEN `output_format="arrow"`
-- WHEN a batch is yielded
-- THEN it is a `pyarrow.RecordBatch`
+**Worker assignment**
 
-#### Scenario: Output format dict
-- GIVEN `output_format="dict"`
-- WHEN a batch is yielded
-- THEN it is a `dict[str, list]`
+| num_workers | files | Expected |
+|-------------|-------|----------|
+| 0 (single process) | any | shard 0 reads all splits |
+| 4 | 4 Parquet files | each worker reads exactly 1 file |
+| 2 | 4 Parquet files | each worker reads 2 files, 0 rows dropped |
+| 4 | 1 Parquet file (1 split) | worker 0 reads it; workers 1–3 yield nothing |
 
-#### Scenario: arrow output without collate_fn raises at construction
-- GIVEN `output_format="arrow"` and `collate_fn=None`
-- WHEN `StructuredDataset` is constructed
-- THEN a `ValueError` is raised immediately
+**Shuffle** — `shuffle=True, seed=42`: two loaders at same epoch produce identical row order; epoch 0 vs epoch 1 produce different order
 
-#### Scenario: Shuffle reproducibility
-- GIVEN `shuffle=True` and `shuffle_seed=42`
-- WHEN two DataLoaders iterate with the same epoch
-- THEN the file order is identical
+**`set_epoch()`** — must be called in main process; splits are regenerated with `seed + epoch`; has no effect when `shuffle=False`
 
-#### Scenario: Epoch reshuffling
-- GIVEN `shuffle=True`
-- WHEN `set_epoch(0)` and `set_epoch(1)` are called
-- THEN the file order differs between epochs
+**`num_workers=None`** — auto-detects to `max(1, os.cpu_count() - 1)`, logged at INFO
 
-#### Scenario: Column projection end-to-end
-- GIVEN `columns=["feature_a", "label"]`
-- WHEN the DataLoader iterates
-- THEN each batch contains only `feature_a` and `label` keys
+**Column projection end-to-end** — `columns=["feature_a", "label"]` → each batch contains only those keys
 
-#### Scenario: Predicate pushdown end-to-end
-- GIVEN `filters=pc.field("feature_b") > 30`
-- WHEN the DataLoader iterates
-- THEN only rows matching the filter are returned
+**Predicate pushdown end-to-end** — `filters=pc.field("feature_b") > 30` → only matching rows returned
 
-#### Scenario: unsupported format raises at construction
-- GIVEN `format="avro"`
-- WHEN `create_dataloader()` is called
-- THEN a `ValueError` is raised
+**Hive partitioning end-to-end** — `data/region=us/year=2024/part.parquet`, `partitioning="hive"` → batches include `region` and `year` columns
 
-#### Scenario: num_workers=None auto-detects
-- GIVEN `num_workers=None`
-- WHEN `create_dataloader()` is called
-- THEN num_workers is set to `max(1, os.cpu_count() - 1)` and logged
+**`scan_filter` (Iceberg)** — `GreaterThan("region_id", 5)` passed to `table.scan()` → only files that could match are scanned; splits generated over pruned file set only
 
-#### Scenario: Hive partitioning end-to-end
-- GIVEN a partitioned directory `data/region=us/year=2024/part.parquet`
-- WHEN `create_dataloader(path, format="parquet", partitioning="hive")` is called
-- THEN each batch includes `region="us"` and `year="2024"` columns alongside data columns
+**`scan_filter` auto-derivation** — `filters=pc.field("row_id") >= 1875`, `scan_filter=None` → system translates to `GreaterThanOrEqual("row_id", 1875)`, logs at INFO, prunes files
 
-#### Scenario: scan_filter prunes files at plan_files() level
-- GIVEN an IcebergDataset with `scan_filter=GreaterThan("region_id", 5)`
-- WHEN `_resolve_files` is called
-- THEN `table.scan(row_filter=GreaterThan("region_id", 5))` is called
-- AND only files that could contain matching rows are returned by `plan_files()`
-- AND splits are generated over the pruned file set only
+**Untranslatable filter fallback** — `filters=pc.field("a") >= pc.field("b")` (field vs field) → translation returns None, full file scan, filter applied row-level, DEBUG log emitted
 
-#### Scenario: scan_filter=None uses full scan
-- GIVEN an IcebergDataset with `scan_filter=None`
-- WHEN `_resolve_files` is called
-- THEN `table.scan(snapshot_id=...)` is called without `row_filter`
+**`split_bytes` sub-file splitting** — large Parquet file with 10 row groups, `split_bytes="10KiB"` → multiple `FileSplit`s with disjoint `RowRange`s produced
 
-#### Scenario: split_bytes triggers sub-file splitting
-- GIVEN a large Parquet file with 10 row groups and `split_bytes="10KiB"`
-- WHEN splits are generated
-- THEN multiple FileSplits with RowRange are produced for the single file
-- AND each RowRange covers a disjoint subset of row groups
-
-#### Scenario: split_rows produces row-count-balanced splits
-- GIVEN multiple Parquet files and `split_rows=5000`
-- WHEN splits are generated
-- THEN each chunk covers at most 5000 rows (aligned to row group boundaries)
-
-#### Scenario: scan_filter auto-derived from filters
-- GIVEN `filters=pc.field("row_id") >= 1875` and `scan_filter=None`
-- WHEN `IcebergDataset` is constructed
-- THEN the system translates `filters` to `GreaterThanOrEqual("row_id", 1875)`
-- AND `_resolve_files` is called with that derived iceberg expression as `scan_filter`
-- AND an INFO log is emitted showing both the pc.Expression and the derived pyiceberg expression
-- AND splits are generated only over the pruned file set
-
-#### Scenario: untranslatable filters falls back to row-level only
-- GIVEN `filters=pc.field("a") >= pc.field("b")` (field vs field — no scalar literal) and `scan_filter=None`
-- WHEN `IcebergDataset` is constructed
-- THEN translation returns None, `_resolve_files` is called without `scan_filter`
-- AND a DEBUG log is emitted explaining the fallback
-- AND all files are scanned; the filter is applied row-level inside workers
+**`split_rows`** — multiple Parquet files, `split_rows=5000` → each chunk covers ≤ 5000 rows aligned to row group boundaries

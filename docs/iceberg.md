@@ -105,9 +105,36 @@ Most `StructuredDataset` parameters apply — except `path`, `format`, `partitio
 
 When the Iceberg table contains **position delete files** (written by `DELETE` or `MERGE INTO`), `IcebergDataset` automatically switches to `pyiceberg.io.pyarrow.ArrowScan` per file — deleted rows are never returned.
 
-!!! warning "Limitations with delete files"
-    - **Equality deletes** are not supported by pyiceberg and will raise `NotImplementedError`. Compact the table first.
-    - **Sub-file splitting is disabled** when delete files are present — position delete offsets reference absolute row positions in the original file.
+### How it works
+
+Both files must be read for every data file that has outstanding deletes:
+
+```
+data_file.parquet      ← all rows including "deleted" ones
+delete_file.parquet    ← list of (file_path, row_position) pairs
+
+ArrowScan reads both → builds in-memory row mask → filters before yielding
+```
+
+pyarrow cannot do this on its own — it has no concept of Iceberg delete files. `ArrowScan` is the only correct path when deletes are present.
+
+### Limitations
+
+!!! warning "Performance and splitting limitations with delete files"
+    - **Both data and delete files are read per file** — more I/O than clean tables.
+    - **Workers reconnect to the catalog per file** to reconstruct the `FileScanTask` — catalog round-trip overhead in every worker, not just at startup.
+    - **Sub-file splitting is disabled** — position delete offsets are absolute row positions within the original file; splitting at row group boundaries would miss deletes in other sub-ranges. Each file with deletes is assigned whole to one worker.
+    - **Equality deletes are not supported** — `pyiceberg` will raise `NotImplementedError`. Compact the table first.
+    - **TOCTOU**: delete files are detected at construction time. New deletes committed after `create_dataloader()` returns will be missed for that dataset instance.
+
+### Workaround: compact before training
+
+```sql
+-- Spark / Trino / Flink
+CALL system.rewrite_data_files('my_db.my_table');
+```
+
+After compaction: no delete files, `_has_deletes=False`, fast path (direct pyarrow, sub-file splitting) is restored.
 
 ## Time Travel
 

@@ -1,3 +1,4 @@
+import inspect
 import logging
 import os
 from collections.abc import Callable, Iterator
@@ -406,6 +407,8 @@ class IcebergDataset(IterableDataset):
         num_workers: int = 1,
         output_format: str = "torch",
         collate_fn: Callable | None = None,
+        num_ranks: int = 1,
+        rank: int = 0,
     ) -> None:
         _require_pyiceberg()
 
@@ -424,7 +427,6 @@ class IcebergDataset(IterableDataset):
         self._batch_size = batch_size
         self._columns = columns
         self._filters = filters
-
         # Auto-derive scan_filter from filters when not explicitly provided
         if scan_filter is None and filters is not None:
             scan_filter = _try_to_iceberg(filters)
@@ -447,6 +449,8 @@ class IcebergDataset(IterableDataset):
         self._num_workers = num_workers
         self._output_format = output_format
         self._collate_fn = collate_fn
+        self._num_ranks = num_ranks
+        self._rank = rank
 
         files, has_deletes, delete_paths = _resolve_files(
             table, catalog_config, snapshot_id, scan_filter
@@ -481,6 +485,15 @@ class IcebergDataset(IterableDataset):
 
     def _generate_splits(self) -> list[Shard]:
         n = max(self._num_workers, 1)
+        sig = inspect.signature(self._strategy.generate)
+        if "num_ranks" in sig.parameters:
+            return self._strategy.generate(
+                self._files,
+                num_workers=n,
+                epoch=self._epoch,
+                num_ranks=self._num_ranks,
+                rank=self._rank,
+            )
         return self._strategy.generate(self._files, num_workers=n, epoch=self._epoch)
 
     def set_epoch(self, epoch: int) -> None:
@@ -567,6 +580,8 @@ class IcebergDataset(IterableDataset):
         num_workers: int | None = None,
         output_format: str = "torch",
         collate_fn: Callable | None = None,
+        num_ranks: int = 1,
+        rank: int = 0,
     ) -> tuple[DataLoader, "IcebergDataset"]:
         """Create a DataLoader for an Iceberg table.
 
@@ -606,6 +621,8 @@ class IcebergDataset(IterableDataset):
             num_workers=num_workers,
             output_format=output_format,
             collate_fn=collate_fn,
+            num_ranks=num_ranks,
+            rank=rank,
         )
 
         effective_collate = collate_fn

@@ -51,86 +51,37 @@ Tests SHALL have at least one end-to-end test per format:
 
 ## Scenarios
 
-#### Scenario: Parquet directory — full read
-- GIVEN a directory with 3 Parquet files, 100 rows each (300 total)
-- WHEN `create_dataloader(path=dir, format="parquet", num_workers=0, batch_size=50)` is called
-- AND the DataLoader is fully iterated
-- THEN total rows collected equals 300
-- AND each batch is a `dict[str, torch.Tensor]`
+**Format coverage** — `num_workers=0`, `batch_size=50`
 
-#### Scenario: ORC directory — full read
-- GIVEN a directory with 2 ORC files, 100 rows each (200 total)
-- WHEN `create_dataloader(path=dir, format="orc", num_workers=0)` is called
-- AND the DataLoader is fully iterated
-- THEN total rows collected equals 200
+| Format | Files | Total rows | Expected |
+|--------|-------|------------|----------|
+| Parquet | 3 × 100 rows | 300 | 300 rows collected, each batch is `dict[str, torch.Tensor]` |
+| ORC | 2 × 100 rows | 200 | 200 rows collected |
+| CSV | 2 × 100 rows | 200 | 200 rows collected |
+| JSONL | 2 × 100 rows | 200 | 200 rows collected |
 
-#### Scenario: CSV directory — full read
-- GIVEN a directory with 2 CSV files, 100 rows each (200 total)
-- WHEN `create_dataloader(path=dir, format="csv", num_workers=0)` is called
-- AND the DataLoader is fully iterated
-- THEN total rows collected equals 200
+**Multi-worker distribution**
 
-#### Scenario: JSONL directory — full read
-- GIVEN a directory with 2 JSONL files, 100 rows each (200 total)
-- WHEN `create_dataloader(path=dir, format="jsonl", num_workers=0)` is called
-- AND the DataLoader is fully iterated
-- THEN total rows collected equals 200
+| Files | `num_workers` | Expected |
+|-------|---------------|----------|
+| 4 Parquet × 100 rows | 2 | 400 total rows, set of row_ids = {0..399}, no duplicates |
+| 6 Parquet × 100 rows | 2 | 600 total rows, each worker reads 3 files |
+| 1 Parquet (1 split) | 4 | 1 split assigned to worker 0; workers 1–3 yield nothing |
 
-#### Scenario: Column projection end-to-end
-- GIVEN a Parquet directory with columns [feature_a, feature_b, label]
-- WHEN `create_dataloader(..., columns=["feature_a", "label"])` is called
-- THEN each batch contains only keys "feature_a" and "label"
+**Feature behaviors**
 
-#### Scenario: Predicate pushdown end-to-end
-- GIVEN a Parquet directory where feature_b values range from 0 to 99 across 100 rows
-- WHEN `create_dataloader(..., filters=pc.field("feature_b") >= 50)` is called
-- THEN total rows collected equals 50 (only rows where feature_b >= 50)
+**Column projection** — `columns=["feature_a", "label"]` on `[feature_a, feature_b, label]` → each batch contains only those two keys
 
-#### Scenario: Glob pattern
-- GIVEN a directory with mixed file types (.parquet and .csv)
-- WHEN `create_dataloader(path="dir/*.parquet", format="parquet", num_workers=0)` is called
-- THEN only Parquet files are read
+**Predicate pushdown** — `filters=pc.field("feature_b") >= 50` on values 0–99 (100-row file) → 50 rows returned
 
-#### Scenario: Single file
-- GIVEN a single Parquet file path
-- WHEN `create_dataloader(path=file, format="parquet", num_workers=0)` is called
-- THEN rows from that file are returned
+**Glob pattern** — `dir/*.parquet` on directory with mixed `.parquet` and `.csv` → only Parquet files read
 
-#### Scenario: output_format="numpy"
-- GIVEN a Parquet directory
-- WHEN `create_dataloader(..., output_format="numpy")` is called
-- THEN each batch value is a `np.ndarray`
+**Single file** — direct file path → rows from that file only
 
-#### Scenario: Shuffle reproducibility
-- GIVEN a Parquet directory with 3 files and `shuffle=True, shuffle_seed=42`
-- WHEN two DataLoaders are created with identical parameters
-- AND both are fully iterated
-- THEN both produce identical row sequences
+**`output_format="numpy"`** — numeric columns are `np.ndarray`
 
-#### Scenario: No rows dropped or duplicated
-- GIVEN a Parquet directory with 3 files, 100 rows each (300 total)
-- WHEN `create_dataloader` is iterated
-- THEN the union of all row ids across batches equals exactly {0..299} with no duplicates
+**Shuffle reproducibility** — `shuffle=True, seed=42`: two loaders at same epoch → identical row sequences
 
-#### Scenario: Multi-worker — no rows dropped or duplicated
-- GIVEN a directory with 4 Parquet files, 100 rows each (400 total)
-- WHEN `create_dataloader(..., num_workers=2)` is called
-- AND the DataLoader is fully iterated
-- THEN total rows collected equals 400
-- AND the set of all row_ids equals exactly {0..399} with no duplicates
+**No rows dropped or duplicated** — 3 files × 100 rows, row_id 0–299 → set of all row_ids equals exactly {0..299}
 
-#### Scenario: Multi-worker — more files than workers
-- GIVEN a directory with 6 Parquet files, 100 rows each (600 total)
-- WHEN `create_dataloader(..., num_workers=2)` is called
-- AND the DataLoader is fully iterated
-- THEN total rows collected equals 600 (each worker reads 3 files)
-- AND no rows are dropped or duplicated
-
-#### Scenario: Imbalanced files — size-balanced splits
-- GIVEN 4 Parquet files with row counts [400, 300, 200, 100] (1000 total)
-- AND `num_workers=2`
-- WHEN `SizeBalancedSplitStrategy` is auto-selected (files have file_size)
-- AND the DataLoader is fully iterated
-- THEN total rows collected equals 1000
-- AND no rows are dropped or duplicated
-- AND the larger worker's row count is no more than 2x the smaller worker's row count
+**Imbalanced files** — files with row counts `[400, 300, 200, 100]`, `num_workers=2` → 1000 total rows, no duplicates, larger worker's count ≤ 2× smaller worker's count

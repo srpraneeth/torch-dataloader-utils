@@ -89,67 +89,30 @@ def read_split(
 
 ## Scenarios
 
-#### Scenario: Read Parquet files
-- GIVEN a Split with 2 Parquet FileSplits
-- WHEN `read_split(split, format="parquet")` is called
-- THEN all rows from both files are yielded as RecordBatches
+**Format reading**
 
-#### Scenario: Read ORC files
-- GIVEN a Split with 1 ORC FileSplit
-- WHEN `read_split(split, format="orc")` is called
-- THEN rows are yielded as RecordBatches
+| Format | Expected |
+|--------|----------|
+| `parquet` | All rows from all files in split yielded as `RecordBatch` |
+| `orc` | Rows yielded as `RecordBatch` |
+| `csv` | Rows yielded as `RecordBatch` |
+| `json` / `jsonl` | Rows yielded as `RecordBatch` |
+| `avro` (unsupported) | `ValueError` naming the format and listing supported ones |
 
-#### Scenario: Read CSV files
-- GIVEN a Split with 1 CSV FileSplit
-- WHEN `read_split(split, format="csv")` is called
-- THEN rows are yielded as RecordBatches
+**Column projection** — `columns=["a", "b"]` on file with `[a, b, c]` → only `a`, `b` present in each batch
 
-#### Scenario: Read JSON/JSONL files
-- GIVEN a Split with 1 JSONL FileSplit
-- WHEN `read_split(split, format="json")` is called
-- THEN rows are yielded as RecordBatches
+**Predicate pushdown** — `filters=pc.field("value") > 50` on values 1–100 → only rows where value > 50 returned
 
-#### Scenario: Column projection
-- GIVEN a Parquet file with columns [a, b, c] and `columns=["a", "b"]`
-- WHEN `read_split(split, format="parquet", columns=["a", "b"])` is called
-- THEN only columns a and b are present in each RecordBatch
+**Batch size** — `batch_size=10` on 100-row file → each `RecordBatch` has ≤ 10 rows; `batch_size=100` on 5-row file → single batch of 5
 
-#### Scenario: Predicate pushdown
-- GIVEN a Parquet file with rows where value in [1..100]
-- WHEN `read_split(split, format="parquet", filters=pc.field("value") > 50)` is called
-- THEN only rows with value > 50 are returned
+**File order** — split with `[f1, f2]` → all rows from `f1` yielded before any rows from `f2`
 
-#### Scenario: Batch size respected
-- GIVEN a file with 100 rows and `batch_size=10`
-- WHEN `read_split(split, format="parquet", batch_size=10)` is called
-- THEN each RecordBatch has at most 10 rows
+**Empty split** — split with no `FileSplit`s → no batches yielded, no error raised
 
-#### Scenario: Unsupported format
-- GIVEN `format="avro"`
-- WHEN `read_split(split, format="avro")` is called
-- THEN a `ValueError` is raised naming the unsupported format and listing supported ones
+**Hive partitioning — scanner path** — file at `data/region=us/year=2024/part.parquet`, `partitioning="hive"` → batches include `region="us"` and `year="2024"` as extra columns
 
-#### Scenario: Files read in order
-- GIVEN a Split with files [f1.parquet, f2.parquet]
-- WHEN `read_split` is called
-- THEN all rows from f1 are yielded before any rows from f2
+**Hive partitioning — row-range path** — large Parquet file at `data/region=eu/part.parquet` read via `RowRange` → batches include `region="eu"` constant column
 
-#### Scenario: Empty split
-- GIVEN a Split with no FileSplits
-- WHEN `read_split` is called
-- THEN no RecordBatches are yielded — no error raised
+**No partitioning** — `partitioning=None` (default) → partition-encoded directory values NOT injected as columns
 
-#### Scenario: Hive partitioning — scanner path
-- GIVEN a directory with structure `data/region=us/year=2024/part.parquet`
-- WHEN `read_split(split, format="parquet", partitioning="hive")` is called
-- THEN each batch includes `region` and `year` columns with values `"us"` and `"2024"`
-
-#### Scenario: Hive partitioning — row-range path
-- GIVEN a large Parquet file at `data/region=eu/part.parquet` read via row-range sub-split
-- WHEN `read_split(split, format="parquet", partitioning="hive")` is called
-- THEN each batch includes a `region` column with value `"eu"`
-
-#### Scenario: No partitioning (default)
-- GIVEN `partitioning=None`
-- WHEN `read_split` is called
-- THEN partition columns are NOT injected into the output batches
+**Storage options local** — `storage_options={}` on local file → reads successfully, no error

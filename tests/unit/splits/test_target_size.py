@@ -1,12 +1,20 @@
 """Unit tests for TargetSizeSplitStrategy."""
 
 import os
+from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+import pytest
+
 from torch_dataloader_utils.splits.core import DataFileInfo
-from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy, _parquet_chunks
+from torch_dataloader_utils.splits.target_size import (
+    TargetSizeSplitStrategy,
+    _orc_chunks,
+    _parquet_chunks,
+    parse_bytes,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -31,6 +39,93 @@ def _file_info(path: str) -> DataFileInfo:
 
 def _non_parquet(name: str = "data.csv") -> DataFileInfo:
     return DataFileInfo(path=f"/tmp/{name}", file_size=1024 * 1024)
+
+
+# ---------------------------------------------------------------------------
+# parse_bytes
+# ---------------------------------------------------------------------------
+
+
+class TestParseBytes:
+    def test_int_passthrough(self):
+        assert parse_bytes(1024) == 1024
+
+    def test_bare_integer_string(self):
+        assert parse_bytes("1048576") == 1048576
+
+    def test_mib(self):
+        assert parse_bytes("128MiB") == 128 * 1024 * 1024
+
+    def test_mib_case_insensitive(self):
+        assert parse_bytes("128mib") == 128 * 1024 * 1024
+
+    def test_mb(self):
+        assert parse_bytes("1mb") == 1_000_000
+
+    def test_gib(self):
+        assert parse_bytes("1GiB") == 1024 ** 3
+
+    def test_gb(self):
+        assert parse_bytes("1GB") == 1_000_000_000
+
+    def test_kib(self):
+        assert parse_bytes("4KiB") == 4096
+
+    def test_kb(self):
+        assert parse_bytes("4KB") == 4000
+
+    def test_tib(self):
+        assert parse_bytes("1TiB") == 1024 ** 4
+
+    def test_fractional_gib(self):
+        assert parse_bytes("1.5GiB") == int(1.5 * 1024 ** 3)
+
+    def test_space_between_value_and_suffix(self):
+        assert parse_bytes("128 MiB") == 128 * 1024 * 1024
+
+    def test_zero_bytes(self):
+        assert parse_bytes(0) == 0
+
+    def test_zero_string(self):
+        assert parse_bytes("0") == 0
+
+
+# ---------------------------------------------------------------------------
+# LPT sort order (no shuffle → largest chunks first)
+# ---------------------------------------------------------------------------
+
+
+class TestLptSortOrder:
+    def test_no_shuffle_assigns_largest_chunks_first(self, tmp_path):
+        """Without shuffle, TargetSizeSplitStrategy sorts chunks largest-first
+        before LPT assignment so the least-loaded worker always gets the biggest
+        remaining chunk — minimising max worker load."""
+        # 4 row groups of sizes 400, 100, 200, 300 (written in that order)
+        path = str(tmp_path / "unequal.parquet")
+        schema = pa.schema([pa.field("x", pa.int32())])
+        writer = pq.ParquetWriter(path, schema)
+        for n in [400, 100, 200, 300]:
+            writer.write_table(pa.table({"x": pa.array(list(range(n)), pa.int32())}))
+        writer.close()
+
+        files = [DataFileInfo(path=path, file_size=os.path.getsize(path))]
+        strategy = TargetSizeSplitStrategy(target_bytes=1, shuffle=False)
+        shards = strategy.generate(files, num_workers=1)
+
+        lengths = [sp.row_range.length for sp in shards[0].splits]
+        # Sorted descending: 400, 300, 200, 100
+        assert lengths == sorted(lengths, reverse=True)
+
+    def test_shuffle_breaks_sort_order(self, tmp_path):
+        """With shuffle=True, splits are randomised — sorted order not guaranteed."""
+        path = str(tmp_path / "f.parquet")
+        _make_parquet(path, num_row_groups=8, rows_per_group=100)
+        files = [_file_info(path)]
+        strategy = TargetSizeSplitStrategy(target_bytes=1, shuffle=True, seed=42)
+        shards = strategy.generate(files, num_workers=1, epoch=0)
+        offsets = [sp.row_range.offset for sp in shards[0].splits]
+        # Shuffled — should NOT be monotonically increasing (with 8 chunks, extremely unlikely)
+        assert offsets != sorted(offsets)
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +214,7 @@ class TestNonParquetFiles:
         ]
         strategy = TargetSizeSplitStrategy(target_bytes=1024 * 1024 * 1024)
         shards = strategy.generate(files, num_workers=1)
-        # Parquet: 1 split (1 row group), CSV: 1 split, ORC: 1 split = 3 total
+        # Parquet: 1 split (1 row group), CSV: 1 split, ORC: 1 split (metadata fallback) = 3 total
         assert sum(len(sh.splits) for sh in shards) == 3
 
 
@@ -269,3 +364,112 @@ class TestEmptyParquet:
         chunks = list(_parquet_chunks(_file_info(path), target_bytes=128 * 1024 * 1024))
         assert len(chunks) == 1
         assert chunks[0].row_range is None
+
+
+# ---------------------------------------------------------------------------
+# _orc_chunks — mocked ORCFile
+# ---------------------------------------------------------------------------
+
+
+def _mock_orf(nstripes: int, nrows: int) -> MagicMock:
+    m = MagicMock()
+    m.nstripes = nstripes
+    m.nrows = nrows
+    return m
+
+
+class TestOrcChunks:
+    def test_single_stripe_yields_one_chunk(self):
+        file = DataFileInfo(path="/tmp/f.orc", file_size=1024)
+        with patch("pyarrow.orc.ORCFile", return_value=_mock_orf(1, 100)):
+            chunks = list(_orc_chunks(file, target_bytes=10 * 1024 * 1024))
+        assert len(chunks) == 1
+        assert chunks[0].row_range is not None
+        assert chunks[0].row_range.offset == 0
+        assert chunks[0].row_range.length == 100
+
+    def test_small_target_yields_one_chunk_per_stripe(self):
+        file = DataFileInfo(path="/tmp/f.orc", file_size=4096)
+        with patch("pyarrow.orc.ORCFile", return_value=_mock_orf(4, 400)):
+            chunks = list(_orc_chunks(file, target_bytes=1))
+        assert len(chunks) == 4
+        assert sum(c.row_range.length for c in chunks) == 400
+
+    def test_large_target_yields_one_chunk(self):
+        file = DataFileInfo(path="/tmp/f.orc", file_size=4096)
+        with patch("pyarrow.orc.ORCFile", return_value=_mock_orf(4, 400)):
+            chunks = list(_orc_chunks(file, target_bytes=1024 * 1024 * 1024))
+        assert len(chunks) == 1
+        assert chunks[0].row_range.offset == 0
+        assert chunks[0].row_range.length == 400
+
+    def test_covers_all_rows_no_gaps(self):
+        file = DataFileInfo(path="/tmp/f.orc", file_size=6144)
+        with patch("pyarrow.orc.ORCFile", return_value=_mock_orf(6, 600)):
+            chunks = list(_orc_chunks(file, target_bytes=1))
+        assert sum(c.row_range.length for c in chunks) == 600
+
+    def test_chunks_are_contiguous(self):
+        file = DataFileInfo(path="/tmp/f.orc", file_size=8192)
+        with patch("pyarrow.orc.ORCFile", return_value=_mock_orf(8, 800)):
+            chunks = list(_orc_chunks(file, target_bytes=1))
+        prev_end = 0
+        for c in chunks:
+            assert c.row_range.offset == prev_end
+            prev_end = c.row_range.offset + c.row_range.length
+        assert prev_end == 800
+
+    def test_zero_stripes_yields_whole_file_chunk(self):
+        file = DataFileInfo(path="/tmp/f.orc", file_size=100)
+        with patch("pyarrow.orc.ORCFile", return_value=_mock_orf(0, 0)):
+            chunks = list(_orc_chunks(file, target_bytes=128 * 1024 * 1024))
+        assert len(chunks) == 1
+        assert chunks[0].row_range is None
+
+    def test_bad_path_falls_back_to_single_chunk(self):
+        bad_file = DataFileInfo(path="/nonexistent/file.orc", file_size=1024)
+        chunks = list(_orc_chunks(bad_file, target_bytes=128 * 1024 * 1024))
+        assert len(chunks) == 1
+        assert chunks[0].row_range is None
+
+    def test_target_rows_mode(self):
+        file = DataFileInfo(path="/tmp/f.orc", file_size=8192)
+        # 8 stripes × 100 rows = 800 rows; target_rows=200 → 2 stripes/chunk → 4 chunks
+        with patch("pyarrow.orc.ORCFile", return_value=_mock_orf(8, 800)):
+            chunks = list(_orc_chunks(file, target_bytes=None, target_rows=200))
+        assert len(chunks) == 4
+        assert sum(c.row_range.length for c in chunks) == 800
+
+    def test_two_stripe_target_packs_correctly(self):
+        # 6 stripes, target = 2 stripes worth of bytes → 3 chunks
+        file = DataFileInfo(path="/tmp/f.orc", file_size=6 * 1000)
+        # target_bytes = 2 × (6000/6) = 2000
+        with patch("pyarrow.orc.ORCFile", return_value=_mock_orf(6, 600)):
+            chunks = list(_orc_chunks(file, target_bytes=2000))
+        assert len(chunks) == 3
+        assert sum(c.row_range.length for c in chunks) == 600
+
+
+class TestOrcInStrategy:
+    def test_orc_file_is_sub_split(self):
+        files = [DataFileInfo(path="/tmp/f.orc", file_size=4096)]
+        strategy = TargetSizeSplitStrategy(target_bytes=1)
+        with patch("pyarrow.orc.ORCFile", return_value=_mock_orf(4, 400)):
+            shards = strategy.generate(files, num_workers=2)
+        total = sum(len(sh.splits) for sh in shards)
+        assert total == 4
+        for shard in shards:
+            for sp in shard.splits:
+                assert sp.row_range is not None
+
+    def test_orc_and_csv_mixed(self):
+        files = [
+            DataFileInfo(path="/tmp/f.orc", file_size=4096),
+            DataFileInfo(path="/tmp/g.csv", file_size=1024),
+        ]
+        strategy = TargetSizeSplitStrategy(target_bytes=1024 * 1024 * 1024)
+        with patch("pyarrow.orc.ORCFile", return_value=_mock_orf(4, 400)):
+            shards = strategy.generate(files, num_workers=1)
+        total = sum(len(sh.splits) for sh in shards)
+        # ORC: 1 chunk (large target), CSV: 1 chunk = 2 total
+        assert total == 2

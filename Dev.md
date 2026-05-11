@@ -46,7 +46,7 @@
 - [x] Implement `set_epoch()` for shuffle reproducibility across epochs
 - [x] Write tests for single-process iteration
 - [x] Write tests for multi-worker assignment (mocked `get_worker_info`)
-- [ ] Write tests for real multi-worker iteration (runs on Linux CI via GitHub Actions — macOS spawn mode causes deadlocks with pyarrow generators)
+- [x] Write tests for real multi-worker iteration (runs on Linux CI via GitHub Actions — macOS spawn mode causes deadlocks with pyarrow generators)
 - [x] Write tests for output format conversion
 - [x] Write tests for collate_fn validation
 
@@ -78,5 +78,41 @@
 ### 9. Publishing
 - [x] Write `README.md` install and quickstart section
 - [x] Configure `pyproject.toml` for PyPI metadata
-- [ ] Set up GitHub Actions release workflow (tag → publish to PyPI)
-- [ ] Publish `0.1.0` to PyPI
+- [x] Set up GitHub Actions release workflow (tag → publish to PyPI)
+- [x] Publish `0.1.0` to PyPI
+- [x] Set up GitHub Actions docs deploy workflow (push to main → GitHub Pages)
+
+## V2 Tasks
+
+### 10. ORC Sub-File Splitting
+- [x] Implement `_orc_chunks()` in `target_size.py` — stripe-level chunking with uniform size approximation
+- [x] Implement `_read_orc_row_range()` in `reader.py` — stripe-level random access via `ORCFile.read(stripes=[...])`
+- [x] Dispatch ORC `row_range` splits to `_read_orc_row_range()` in `read_split()`
+- [x] Write unit tests for `_orc_chunks()` (mocked `ORCFile` — fallback paths, target_rows mode, contiguity)
+- [x] Write unit tests for `_read_orc_row_range()` (real file — full file, two halves, column projection, filter, batch_size, Hive partitioning)
+- [x] Write integration tests for ORC sub-file splitting (no rows dropped, no duplicates, rank-aware)
+
+### 11. Rank-Aware DDP Sharding
+- [x] Add `num_ranks: int = 1`, `rank: int = 0` to `TargetSizeSplitStrategy.generate()`
+- [x] Add `num_ranks: int = 1`, `rank: int = 0` to `RoundRobinSplitStrategy.generate()`
+- [x] Implement interleaved rank partitioning: `rank_splits = all_splits[rank::num_ranks]`
+- [x] Fix negative rank validation: `not (0 <= rank < num_ranks)` in both strategies
+- [x] Add `num_ranks`, `rank` to `StructuredDataset.__init__()` and `create_dataloader()`
+- [x] Add `num_ranks`, `rank` to `IcebergDataset.__init__()` and `create_dataloader()`
+- [x] Backward-compat: detect V1 strategy signatures via `inspect.signature` and skip rank params
+- [x] Write unit tests for rank distribution, shuffle determinism, edge cases (empty ranks, uneven splits)
+- [x] Write integration tests: torchrun multi-rank correctness, ORC rank-aware sharding
+- [x] Write integration tests: Iceberg rank-aware sharding (2 ranks, 3 ranks, more ranks than files)
+
+### 12. `parse_bytes` String Form
+- [x] Accept `target_bytes` as human-readable string (`"128MiB"`, `"1GiB"`, `"512MB"`)
+- [x] Write unit tests for all supported suffixes (B, KB, KiB, MB, MiB, GB, GiB, TB, TiB)
+
+### 13. Iceberg Delete File Limitations
+- [x] Document delete file mechanism and limitations in `docs/limitations.md`
+- [x] Expand `docs/iceberg.md` with delete file warning and how-it-works diagram
+- [x] Update `README.md` Challenges section with delete file limitations
+
+### 14. Infrastructure (deferred)
+- [ ] Real GCS tests (fake-gcs-server) via Docker Compose in CI
+- [ ] Real Azure tests (Azurite) via Docker Compose in CI

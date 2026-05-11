@@ -12,6 +12,7 @@ import os
 
 import pyarrow as pa
 import pyarrow.compute as pc
+import pyarrow.parquet as pq
 import pytest
 
 pytest.importorskip("pyiceberg", reason="pyiceberg not installed — skipping Iceberg tests")
@@ -601,3 +602,292 @@ def test_worker_beyond_split_count_yields_nothing(iceberg_table_3files):
         batches = list(dataset)
 
     assert batches == []
+
+
+# ---------------------------------------------------------------------------
+# Fixture: unequal files with controlled row groups (for sub-file + rank tests)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def iceberg_table_unequal(iceberg_catalog):
+    """Iceberg table with 4 unequal files registered via add_files.
+
+    Files and row groups:
+      part_0000.parquet — 100 rows, row_group_size= 50 → 2 row groups
+      part_0001.parquet — 300 rows, row_group_size=100 → 3 row groups
+      part_0002.parquet — 500 rows, row_group_size=100 → 5 row groups
+      part_0003.parquet — 200 rows, row_group_size=100 → 2 row groups
+    Total: 1100 rows, 12 row groups
+    """
+    catalog, tmp_path = iceberg_catalog
+
+    schema = Schema(
+        NestedField(1, "row_id", IntegerType(), required=False),
+        NestedField(2, "feature_a", FloatType(), required=False),
+        NestedField(3, "feature_b", IntegerType(), required=False),
+        NestedField(4, "label", IntegerType(), required=False),
+    )
+    table = catalog.create_table("mydb.unequal_table", schema=schema)
+
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+
+    file_specs = [(100, 50), (300, 100), (500, 100), (200, 100)]
+    file_paths = []
+    offset = 0
+    for i, (n_rows, rg_size) in enumerate(file_specs):
+        row_ids = list(range(offset, offset + n_rows))
+        arrow_table = pa.table(
+            {
+                "row_id": pa.array(row_ids, pa.int32()),
+                "feature_a": pa.array([float(v % 10) for v in row_ids], pa.float32()),
+                "feature_b": pa.array([v % 100 for v in row_ids], pa.int32()),
+                "label": pa.array([v % 2 for v in row_ids], pa.int32()),
+            }
+        )
+        path = files_dir / f"part_{i:04d}.parquet"
+        pq.write_table(arrow_table, path, row_group_size=rg_size)
+        file_paths.append(f"file://{path}")
+        offset += n_rows
+
+    table.add_files(file_paths)
+
+    catalog_config = {
+        "name": "test",
+        "uri": f"sqlite:///{tmp_path}/catalog.db",
+        "warehouse": f"file://{tmp_path}/warehouse",
+    }
+    total_rows = sum(n for n, _ in file_specs)
+    return catalog_config, table, tmp_path, total_rows
+
+
+# ---------------------------------------------------------------------------
+# Scenario: Rank-aware sharding — disjoint, complete coverage
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_rank_aware_sharding_two_ranks(iceberg_table_3files):
+    """Two ranks get disjoint file subsets that together cover all 300 rows."""
+    from unittest.mock import MagicMock, patch
+
+    catalog_config, _, _ = iceberg_table_3files
+
+    all_ids = []
+    for rank in range(2):
+        _, dataset = IcebergDataset.create_dataloader(
+            table="mydb.test_table",
+            catalog_config=catalog_config,
+            num_workers=1,
+            num_ranks=2,
+            rank=rank,
+        )
+        mock_info = MagicMock()
+        mock_info.id = 0
+        with patch("torch.utils.data.get_worker_info", return_value=mock_info):
+            for batch in dataset:
+                all_ids.extend(batch["row_id"].tolist())
+
+    assert len(all_ids) == 300
+    assert sorted(all_ids) == list(range(300))
+    assert len(set(all_ids)) == 300  # no cross-rank duplicates
+
+
+@pytest.mark.integration
+def test_rank_aware_sharding_three_ranks(iceberg_table_3files):
+    """Three ranks together cover all rows exactly once."""
+    from unittest.mock import MagicMock, patch
+
+    catalog_config, _, _ = iceberg_table_3files
+
+    all_ids = []
+    for rank in range(3):
+        _, dataset = IcebergDataset.create_dataloader(
+            table="mydb.test_table",
+            catalog_config=catalog_config,
+            num_workers=1,
+            num_ranks=3,
+            rank=rank,
+        )
+        mock_info = MagicMock()
+        mock_info.id = 0
+        with patch("torch.utils.data.get_worker_info", return_value=mock_info):
+            for batch in dataset:
+                all_ids.extend(batch["row_id"].tolist())
+
+    assert sorted(all_ids) == list(range(300))
+    assert len(set(all_ids)) == len(all_ids)
+
+
+@pytest.mark.integration
+def test_rank_aware_sharding_more_ranks_than_files(iceberg_table_3files):
+    """With more ranks than files, some ranks get 0 splits — no rows missed."""
+    from unittest.mock import MagicMock, patch
+
+    catalog_config, _, _ = iceberg_table_3files
+
+    all_ids = []
+    for rank in range(5):
+        _, dataset = IcebergDataset.create_dataloader(
+            table="mydb.test_table",
+            catalog_config=catalog_config,
+            num_workers=1,
+            num_ranks=5,
+            rank=rank,
+        )
+        mock_info = MagicMock()
+        mock_info.id = 0
+        with patch("torch.utils.data.get_worker_info", return_value=mock_info):
+            for batch in dataset:
+                all_ids.extend(batch["row_id"].tolist())
+
+    assert sorted(all_ids) == list(range(300))
+
+
+# ---------------------------------------------------------------------------
+# Scenario: Sub-file splitting with split_rows
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_sub_file_splitting_produces_row_group_chunks(iceberg_table_unequal):
+    """split_rows forces Parquet row-group-level chunks; all rows still returned."""
+    catalog_config, _, _, total_rows = iceberg_table_unequal
+
+    loader, dataset = IcebergDataset.create_dataloader(
+        table="mydb.unequal_table",
+        catalog_config=catalog_config,
+        num_workers=0,
+        batch_size=128,
+        split_rows=50,  # smaller than any row group → one chunk per row group
+    )
+
+    # 12 row groups total → 12 chunks
+    total_splits = sum(len(s.splits) for s in dataset._splits)
+    assert total_splits == 12
+
+    rows = _collect(loader)
+    assert sorted(rows["row_id"]) == list(range(total_rows))
+
+
+@pytest.mark.integration
+def test_sub_file_splitting_with_rank_sharding(iceberg_table_unequal):
+    """split_rows + num_ranks together: each rank sees disjoint row-group chunks."""
+    from unittest.mock import MagicMock, patch
+
+    catalog_config, _, _, total_rows = iceberg_table_unequal
+
+    all_ids = []
+    for rank in range(3):
+        _, dataset = IcebergDataset.create_dataloader(
+            table="mydb.unequal_table",
+            catalog_config=catalog_config,
+            num_workers=1,
+            num_ranks=3,
+            rank=rank,
+            split_rows=50,
+        )
+        mock_info = MagicMock()
+        mock_info.id = 0
+        with patch("torch.utils.data.get_worker_info", return_value=mock_info):
+            for batch in dataset:
+                all_ids.extend(batch["row_id"].tolist())
+
+    assert sorted(all_ids) == list(range(total_rows))
+    assert len(set(all_ids)) == len(all_ids)
+
+
+@pytest.mark.integration
+def test_split_bytes_string_form(iceberg_table_3files):
+    """split_bytes accepts a human-readable string like '1MiB'."""
+    catalog_config, _, _ = iceberg_table_3files
+
+    loader, _ = IcebergDataset.create_dataloader(
+        table="mydb.test_table",
+        catalog_config=catalog_config,
+        num_workers=0,
+        split_bytes="1MiB",
+    )
+    rows = _collect(loader)
+    assert sorted(rows["row_id"]) == list(range(300))
+
+
+# ---------------------------------------------------------------------------
+# Scenario: Overwrite snapshot — old data files not returned
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_overwrite_snapshot_returns_only_new_data(iceberg_catalog):
+    """After overwriting a table, only new data files are returned — old snapshot
+    files are marked DELETED in the manifest and excluded from scan."""
+    catalog, tmp_path = iceberg_catalog
+
+    schema = Schema(NestedField(1, "row_id", IntegerType(), required=False))
+    table = catalog.create_table("mydb.overwrite_table", schema=schema)
+
+    # Write snapshot 1: rows 0–99
+    table.append(pa.table({"row_id": pa.array(list(range(100)), pa.int32())}))
+    snap1_id = table.current_snapshot().snapshot_id
+
+    # Overwrite (append-then-replace via overwrite): rows 1000–1099
+    table.overwrite(pa.table({"row_id": pa.array(list(range(1000, 1100)), pa.int32())}))
+
+    catalog_config = {
+        "name": "test",
+        "uri": f"sqlite:///{tmp_path}/catalog.db",
+        "warehouse": f"file://{tmp_path}/warehouse",
+    }
+
+    # Current snapshot should return only new rows
+    loader, _ = IcebergDataset.create_dataloader(
+        table="mydb.overwrite_table",
+        catalog_config=catalog_config,
+        num_workers=0,
+    )
+    rows = _collect(loader)
+    assert all(v >= 1000 for v in rows["row_id"]), "Old rows must not appear after overwrite"
+    assert len(rows["row_id"]) == 100
+
+    # Time travel to snapshot 1 returns only original rows
+    loader_snap1, _ = IcebergDataset.create_dataloader(
+        table="mydb.overwrite_table",
+        catalog_config=catalog_config,
+        num_workers=0,
+        snapshot_id=snap1_id,
+    )
+    rows_snap1 = _collect(loader_snap1)
+    assert all(v < 100 for v in rows_snap1["row_id"])
+    assert len(rows_snap1["row_id"]) == 100
+
+
+# ---------------------------------------------------------------------------
+# Scenario: backward-compat V1 custom strategy (no num_ranks in signature)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_v1_custom_strategy_without_rank_params(iceberg_table_3files):
+    """A custom strategy with V1 generate() signature works without num_ranks/rank."""
+    from torch_dataloader_utils.splits.core import DataFileInfo, Shard, Split
+
+    class V1Strategy:
+        def generate(self, files: list[DataFileInfo], num_workers: int, epoch: int = 0):
+            shards = [Shard(id=i) for i in range(num_workers)]
+            for i, f in enumerate(files):
+                shards[i % num_workers].splits.append(Split(file=f))
+            return shards
+
+    catalog_config, table, _ = iceberg_table_3files
+    loader, _ = IcebergDataset.create_dataloader(
+        table="mydb.test_table",
+        catalog_config=catalog_config,
+        num_workers=0,
+        split_strategy=V1Strategy(),
+        num_ranks=2,
+        rank=0,
+    )
+    rows = _collect(loader)
+    # Strategy ignores num_ranks — returns all 300 rows for rank 0
+    assert len(rows["row_id"]) == 300

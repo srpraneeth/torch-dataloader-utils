@@ -3,6 +3,7 @@ import logging
 import random
 from collections.abc import Iterator
 
+import pyarrow.orc as orc
 import pyarrow.parquet as pq
 
 from torch_dataloader_utils.splits.core import DataFileInfo, RowRange, Shard, Split
@@ -110,6 +111,76 @@ def _parquet_chunks(
         current_row_offset += rg_rows
 
 
+def _orc_chunks(
+    file: DataFileInfo,
+    target_bytes: int | None,
+    target_rows: int | None = None,
+) -> Iterator[Split]:
+    """Yield Split chunks for an ORC file, aligned to stripe boundaries.
+
+    Reads only the file footer — no data scan. Uses a uniform per-stripe size
+    approximation (PyArrow's ORCFile does not expose individual stripe sizes).
+    Row offsets stored in RowRange are derived from the same formula used at read
+    time, ensuring correct stripe-index recovery.
+    """
+    try:
+        orf = orc.ORCFile(file.path)
+        nstripes = orf.nstripes
+        nrows = orf.nrows
+    except Exception as e:
+        logger.warning(
+            "Could not read ORC metadata for %s (%s) — treating as single chunk",
+            file.path,
+            e,
+        )
+        yield Split(file=file, row_range=None)
+        return
+
+    if nstripes == 0 or nrows == 0:
+        yield Split(file=file, row_range=None)
+        return
+
+    approx_bytes_per_stripe = (file.file_size or 1) / nstripes
+    approx_rows_per_stripe = nrows / nstripes
+
+    chunk_start_stripe = 0
+    chunk_bytes = 0.0
+    chunk_rows = 0.0
+
+    for i in range(nstripes):
+        chunk_bytes += approx_bytes_per_stripe
+        chunk_rows += approx_rows_per_stripe
+
+        at_last = i == nstripes - 1
+        if target_rows is not None:
+            chunk_full = chunk_rows >= target_rows
+        else:
+            chunk_full = chunk_bytes >= (target_bytes or 0)
+
+        if chunk_full or at_last:
+            chunk_end_stripe = i + 1
+            start_row = round(chunk_start_stripe * nrows / nstripes)
+            if at_last:
+                length = nrows - start_row
+            else:
+                length = round(chunk_end_stripe * nrows / nstripes) - start_row
+            yield Split(
+                file=file,
+                row_range=RowRange(offset=start_row, length=length),
+            )
+            logger.debug(
+                "ORC chunk: %s  stripes=[%d, %d)  start_row=%d  length=%d",
+                file.path,
+                chunk_start_stripe,
+                chunk_end_stripe,
+                start_row,
+                length,
+            )
+            chunk_start_stripe = chunk_end_stripe
+            chunk_bytes = 0.0
+            chunk_rows = 0.0
+
+
 class TargetSizeSplitStrategy:
     """Splits files into target-sized chunks and distributes them across workers.
 
@@ -152,15 +223,24 @@ class TargetSizeSplitStrategy:
         files: list[DataFileInfo],
         num_workers: int,
         epoch: int = 0,
+        num_ranks: int = 1,
+        rank: int = 0,
     ) -> list[Shard]:
+        if num_ranks < 1:
+            raise ValueError(f"num_ranks must be >= 1, got {num_ranks}")
+        if not (0 <= rank < num_ranks):
+            raise ValueError(f"rank {rank} is out of range for num_ranks={num_ranks}")
+
         # Build a flat list of splits across all files
         all_splits: list[Split] = []
         for file in files:
             ext = file.path.rsplit(".", 1)[-1].lower() if "." in file.path else ""
             if ext == "parquet":
                 all_splits.extend(_parquet_chunks(file, self.target_bytes, self.target_rows))
+            elif ext == "orc":
+                all_splits.extend(_orc_chunks(file, self.target_bytes, self.target_rows))
             else:
-                # Non-Parquet: treat as a single unsplittable chunk
+                # CSV, JSONL, etc: no footer metadata — single unsplittable chunk
                 all_splits.append(Split(file=file, row_range=None))
 
         if self.shuffle:
@@ -175,11 +255,23 @@ class TargetSizeSplitStrategy:
                 reverse=True,
             )
 
+        # Rank partitioning: interleaved slice assigns disjoint splits to each rank
+        if logger.isEnabledFor(logging.INFO):
+            def _fmt(sp: Split) -> str:
+                fname = sp.file.path.rsplit("/", 1)[-1]
+                if sp.row_range is not None:
+                    return f"{fname}[{sp.row_range.offset},{sp.row_range.offset + sp.row_range.length})"
+                return f"{fname}[full]"
+            logger.info("Total chunks: %d  %s", len(all_splits), "  ".join(_fmt(sp) for sp in all_splits))
+        rank_splits = all_splits[rank::num_ranks]
+        if logger.isEnabledFor(logging.INFO):
+            logger.info("Assigning to rank %d/%d: %d chunks  %s", rank, num_ranks, len(rank_splits), "  ".join(_fmt(sp) for sp in rank_splits))
+
         # Greedy min-heap: always assign next split to the least-loaded worker
         heap = [(0, i) for i in range(num_workers)]
         heapq.heapify(heap)
         shards = [Shard(id=i) for i in range(num_workers)]
-        for split in all_splits:
+        for split in rank_splits:
             split_size = (
                 split.row_range.length
                 if split.row_range is not None
@@ -189,37 +281,12 @@ class TargetSizeSplitStrategy:
             shards[worker_id].splits.append(split)
             heapq.heappush(heap, (total + split_size, worker_id))
 
-        mode = (
-            f"target_rows={self.target_rows}"
-            if self.target_rows
-            else f"target_bytes={self.target_bytes}"
-        )
-        splits_per_worker = [len(s.splits) for s in shards]
-        rows_per_worker = [
-            sum(
-                sp.row_range.length if sp.row_range else (sp.file.record_count or 0)
-                for sp in s.splits
-            )
-            for s in shards
-        ]
-        logger.info(
-            "TargetSizeSplitStrategy: %d file(s) → %d split(s) → %d worker(s)  "
-            "%s  epoch=%d  shuffle=%s  splits_per_worker=%s  rows_per_worker=%s",
-            len(files),
-            len(all_splits),
-            num_workers,
-            mode,
-            epoch,
-            self.shuffle,
-            splits_per_worker,
-            rows_per_worker,
-        )
-        for shard in shards:
-            logger.debug(
-                "Shard %d: %d split(s)  %s",
-                shard.id,
-                len(shard.splits),
-                [(s.file.path, s.row_range) for s in shard.splits],
-            )
+        if logger.isEnabledFor(logging.INFO):
+            for shard in shards:
+                total_rows = sum(
+                    sp.row_range.length if sp.row_range else (sp.file.record_count or 0)
+                    for sp in shard.splits
+                )
+                logger.info("Shard %d: %d chunks  %d rows  %s", shard.id, len(shard.splits), total_rows, "  ".join(_fmt(sp) for sp in shard.splits))
 
         return shards

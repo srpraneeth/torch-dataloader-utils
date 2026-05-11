@@ -125,74 +125,35 @@ Sub-file splitting SHALL only apply to Parquet and Iceberg formats (not CSV/JSON
 
 ## Scenarios
 
-#### Scenario: Round-robin even distribution
-- GIVEN 8 equi-sized files and 4 workers
-- WHEN `RoundRobinSplitStrategy` generates splits
-- THEN each split contains exactly 2 files
+**RoundRobin distribution**
 
-#### Scenario: Round-robin uneven distribution
-- GIVEN 9 files and 4 workers
-- WHEN `RoundRobinSplitStrategy` generates splits
-- THEN no file appears in more than one split
-- AND the largest split has at most one more file than the smallest
+| Files | Workers | Expected |
+|-------|---------|----------|
+| 8 equal files | 4 | Each split gets exactly 2 files |
+| 9 files | 4 | No file in more than one split; largest split has at most 1 more file than smallest |
 
-#### Scenario: Size-balanced with record_count (Iceberg)
-- GIVEN 4 IcebergDataFileInfo files with record_counts [1000, 500, 300, 200] and 2 workers
-- WHEN `SizeBalancedSplitStrategy` generates splits
-- THEN split totals are as equal as possible (e.g. [1000] vs [500+300+200=1000])
+**SizeBalanced distribution**
 
-#### Scenario: Size-balanced with file_size (plain files)
-- GIVEN 4 DataFileInfo files with file_sizes [100, 50, 30, 20] and 2 workers
-- WHEN `SizeBalancedSplitStrategy` generates splits
-- THEN split totals are as equal as possible by bytes
+| Input | Workers | Expected |
+|-------|---------|----------|
+| `record_counts=[1000, 500, 300, 200]` (Iceberg) | 2 | Totals: `[1000]` vs `[500+300+200=1000]` |
+| `file_sizes=[100, 50, 30, 20]` (plain files) | 2 | Split totals as equal as possible by bytes |
+| Files with no `file_size`, no `record_count` | any | Falls back to round-robin |
 
-#### Scenario: Size-balanced fallback to round-robin
-- GIVEN files with no file_size and no record_count
-- WHEN `SizeBalancedSplitStrategy` generates splits
-- THEN falls back to round-robin assignment
+**Strategy auto-selection**
 
-#### Scenario: Auto-selection — Iceberg files
-- GIVEN all files are IcebergDataFileInfo with record_count populated
-- WHEN split_strategy=None
-- THEN SizeBalancedSplitStrategy is selected automatically
+| File metadata | Selected strategy |
+|---------------|------------------|
+| All `IcebergDataFileInfo` with `record_count` | `SizeBalancedSplitStrategy` |
+| All `DataFileInfo` with `file_size` | `SizeBalancedSplitStrategy` |
+| Files with no size metadata | `RoundRobinSplitStrategy` |
 
-#### Scenario: Auto-selection — plain files with size
-- GIVEN all files are DataFileInfo with file_size populated
-- WHEN split_strategy=None
-- THEN SizeBalancedSplitStrategy is selected automatically
+**Shuffle** — `shuffle=True, seed=42`: same epoch → identical split assignments; epoch 0 vs epoch 1 → different file order
 
-#### Scenario: Auto-selection — plain files without size
-- GIVEN files with no size metadata
-- WHEN split_strategy=None
-- THEN RoundRobinSplitStrategy is selected automatically
+**No shuffle** — `shuffle=False`: `__iter__` called twice → split generation runs only once (cached)
 
-#### Scenario: Shuffle reproducibility
-- GIVEN shuffle=True and shuffle_seed=42
-- WHEN two split generations run with the same epoch
-- THEN both produce identical split assignments
+**Custom strategy** — user-defined class with `generate()` method, no inheritance → accepted as `split_strategy=` without error
 
-#### Scenario: Epoch variation
-- GIVEN shuffle=True and shuffle_seed=42
-- WHEN splits are generated for epoch 0 and epoch 1
-- THEN the file order differs between epochs
+**V1 row_range** — any V1 strategy → every `FileSplit` has `row_range=None`
 
-#### Scenario: No shuffle — splits cached
-- GIVEN shuffle=False
-- WHEN __iter__() is called for epoch 0 and epoch 1
-- THEN split generation runs only once
-
-#### Scenario: Custom strategy — no inheritance needed
-- GIVEN a user-defined class with a generate() method
-- WHEN passed as split_strategy=
-- THEN it is used without any inheritance from SplitStrategy
-
-#### Scenario: V1 row_range is always None
-- GIVEN any V1 strategy (RoundRobin or SizeBalanced)
-- WHEN splits are generated
-- THEN every FileSplit has row_range=None
-
-#### Scenario: V2 sub-file splitting for massive file `[v2]`
-- GIVEN 1 file with record_count=1_000_000 and 4 workers
-- WHEN a sub-file strategy generates splits
-- THEN each split contains one FileSplit with RowRange(offset=N*250_000, length=250_000)
-- AND no rows overlap across splits
+**V2 sub-file splitting** — 1 file, `record_count=1_000_000`, 4 workers → 4 `FileSplit`s each with `RowRange(offset=N*250_000, length=250_000)`, no rows overlap

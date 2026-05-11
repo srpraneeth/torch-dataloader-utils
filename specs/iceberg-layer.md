@@ -122,37 +122,16 @@ class IcebergDataset:
 
 ## Scenarios
 
-#### Scenario: End-to-end Parquet read
-- GIVEN a local Iceberg table with 3 Parquet files × 100 rows
-- WHEN `IcebergDataset.create_dataloader(table=..., catalog_config=..., num_workers=0)` is called
-- THEN total rows collected equals 300 and each batch is `dict[str, torch.Tensor]`
+**End-to-end read** — 3 Parquet files × 100 rows, `num_workers=0` → 300 rows, each batch is `dict[str, torch.Tensor]`, no rows dropped or duplicated
 
-#### Scenario: Column projection
-- GIVEN an Iceberg table with columns [feature_a, feature_b, label]
-- WHEN `create_dataloader(..., columns=["feature_a", "label"])` is called
-- THEN each batch contains only keys "feature_a" and "label"
+**Column projection** — `columns=["feature_a", "label"]` → each batch contains only those two keys
 
-#### Scenario: Predicate pushdown
-- GIVEN an Iceberg table with feature_b values 0–99 across files
-- WHEN `create_dataloader(..., filters=pc.field("feature_b") >= 50)` is called
-- THEN only rows where feature_b >= 50 are returned
+**Predicate pushdown** — `filters=pc.field("feature_b") >= 50` on values 0–99 → only rows ≥ 50 returned
 
-#### Scenario: Snapshot time travel
-- GIVEN an Iceberg table with two snapshots
-- WHEN `create_dataloader(..., snapshot_id=<old_id>)` is called
-- THEN rows from the old snapshot are returned, not the current one
+**Snapshot time travel** — `snapshot_id=<old_id>` → rows from the old snapshot returned, not current
 
-#### Scenario: TargetSizeSplitStrategy auto-selected
-- GIVEN an Iceberg table where all files have record_count metadata
-- WHEN `create_dataloader()` is called with default `split_strategy=None`
-- THEN `TargetSizeSplitStrategy` is auto-selected (default strategy)
+**Strategy auto-selection** — all files have `record_count` → `TargetSizeSplitStrategy` auto-selected
 
-#### Scenario: Missing pyiceberg raises ImportError
-- GIVEN `pyiceberg` is not installed
-- WHEN `IcebergDataset.create_dataloader(...)` is called
-- THEN `ImportError` is raised with `pip install torch-dataloader-utils[iceberg]`
+**Missing pyiceberg** — `pyiceberg` not installed → `ImportError` with `pip install torch-dataloader-utils[iceberg]`
 
-#### Scenario: No rows dropped or duplicated
-- GIVEN an Iceberg table with 3 files × 100 rows, row_id 0–299
-- WHEN `create_dataloader` is fully iterated with `num_workers=0`
-- THEN the set of all row_ids equals exactly {0..299} with no duplicates
+**No rows dropped or duplicated** — 3 files × 100 rows, row_id 0–299, `num_workers=0` → set of all row_ids equals exactly {0..299}
