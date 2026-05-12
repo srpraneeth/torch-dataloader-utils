@@ -36,6 +36,8 @@ The system SHALL accept the following parameters at construction:
 - `storage_options: dict | None` — forwarded to fsspec and read_split
 - `collate_fn: Callable | None` — forwarded to DataLoader
 - `partitioning: str | None` — None = no partitioning decoding; `"hive"` = decode Hive-style directory partitions
+- `num_ranks: int` — total DDP rank count; default 1 (single-rank / V1 behaviour)
+- `rank: int` — this process's global rank (0-based); default 0
 
 **IcebergDataset** (all StructuredDataset params except `path`/`format`, plus):
 - `table: str` — fully qualified table identifier (e.g. `"my_db.my_table"` or `"ns.db.table"`)
@@ -83,8 +85,8 @@ When `split_strategy=None` the system SHALL auto-select:
 
 `TargetSizeSplitStrategy` behaviour:
 - Parquet files: read row group metadata from file footer (no data scan), pack consecutive row groups into chunks targeting `split_bytes`. Each chunk becomes a `FileSplit` with a `RowRange`.
-- Non-Parquet files: treated as a single unsplittable chunk (no footer metadata).
-- `split_rows` overrides `split_bytes` when both are set.
+- ORC files: split at stripe boundaries using uniform row-count approximation (`nrows / nstripes`). Each stripe group becomes a `FileSplit` with a `RowRange`.
+- CSV / JSON / JSONL: treated as a single unsplittable chunk (no footer metadata).
 - Chunks are distributed across workers using a greedy min-heap (LPT scheduling) — minimises maximum worker load for unequal chunk sizes.
 - Default `target_bytes` = 128 MiB.
 
@@ -162,6 +164,8 @@ class StructuredDataset(IterableDataset):
         storage_options: dict | None = None,
         collate_fn: Callable | None = None,
         partitioning: str | None = None,
+        num_ranks: int = 1,
+        rank: int = 0,
     ) -> None: ...
 
     def set_epoch(self, epoch: int) -> None: ...
@@ -185,6 +189,8 @@ class StructuredDataset(IterableDataset):
         storage_options: dict | None = None,
         collate_fn: Callable | None = None,
         partitioning: str | None = None,
+        num_ranks: int = 1,
+        rank: int = 0,
     ) -> tuple[DataLoader, "StructuredDataset"]: ...
 
 
@@ -206,6 +212,8 @@ class IcebergDataset(IterableDataset):
         num_workers: int = 1,
         output_format: str = "torch",
         collate_fn: Callable | None = None,
+        num_ranks: int = 1,
+        rank: int = 0,
     ) -> None: ...
 
     def set_epoch(self, epoch: int) -> None: ...
@@ -229,6 +237,8 @@ class IcebergDataset(IterableDataset):
         num_workers: int | None = None,
         output_format: str = "torch",
         collate_fn: Callable | None = None,
+        num_ranks: int = 1,
+        rank: int = 0,
     ) -> tuple[DataLoader, "IcebergDataset"]: ...
 ```
 
@@ -264,7 +274,7 @@ class IcebergDataset(IterableDataset):
 
 **Shuffle** — `shuffle=True, seed=42`: two loaders at same epoch produce identical row order; epoch 0 vs epoch 1 produce different order
 
-**`set_epoch()`** — must be called in main process; splits are regenerated with `seed + epoch`; has no effect when `shuffle=False`
+**`set_epoch()`** — must be called in main process; splits are always regenerated with `seed + epoch`; with `shuffle=False` the order is deterministic and identical each call — safe to omit in single-epoch training
 
 **`num_workers=None`** — auto-detects to `max(1, os.cpu_count() - 1)`, logged at INFO
 

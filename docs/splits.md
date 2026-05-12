@@ -16,7 +16,7 @@ Training process (GPU)
     └── DataLoader Worker 3  ← reads its assigned files, decodes, batches
 ```
 
-These workers are **not** DDP training ranks. In a multi-GPU setup, each DDP rank has its own `DataLoader` with its own `num_workers` I/O workers. V1 does not re-shard across DDP ranks automatically — see [Training Stack](training.md) for details.
+These workers are **not** DDP training ranks. In a multi-GPU setup, each DDP rank has its own `DataLoader` with its own `num_workers` I/O workers. Use `num_ranks` and `rank` on `create_dataloader()` for rank-level file sharding — see [Rank-Aware DDP Sharding](#rank-aware-ddp-sharding) below.
 
 ## How Splits Work
 
@@ -56,23 +56,22 @@ loader, _ = StructuredDataset.create_dataloader(
 |--------|-------------------|--------------------|------------------------|
 | **Parquet** | Row group | Yes | Footer metadata (no data read) |
 | **Iceberg** | Row group (resolves to Parquet files) | Yes | Footer metadata via pyiceberg scan |
-| **ORC** | Whole file | No (V1) — stripes exist, planned for V2 | File size only (byte-based estimate) |
+| **ORC** | Stripe (uniform approximation) | Yes — stripe-boundary chunks | Approximate (nrows/nstripes) |
 | **CSV** | Whole file | No | File size only |
 | **JSON / JSONL** | Whole file | No | File size only |
 
 **Parquet and Iceberg** are first-class: row group metadata is read once in the main process at split-generation time (no data scan, just the file footer — typically a few KB per file). Row groups are packed into `split_bytes`-sized chunks. A single large file can produce many chunks assigned to different workers.
 
-**ORC, CSV, JSON, JSONL** are treated as unsplittable: each file becomes one chunk. The strategy still balances by estimated byte size across workers, but a single large file cannot be split between workers. For good parallelism with these formats, partition your data into many smaller files before training.
+**ORC** files are split at stripe boundaries. Because PyArrow does not expose per-stripe row counts in the footer, the row count is approximated uniformly as `nrows / nstripes`. The reader calls `ORCFile.read_stripe()` for each assigned stripe — true random access, no full scan.
 
-!!! tip "Large ORC or CSV files"
-    If you have a few very large ORC or CSV files, sub-file splitting is not available. Split them into smaller files (e.g. 128–512 MiB each) to give the strategy enough chunks to balance across workers.
+**CSV, JSON, JSONL** are treated as unsplittable: each file becomes one chunk. For good parallelism with these formats, partition your data into many smaller files before training.
 
-!!! note "V2 roadmap — ORC sub-file splitting"
-    ORC files have **stripes** (equivalent to Parquet row groups) with row counts and byte offsets in the file footer. Sub-file splitting for ORC is technically feasible and is planned for V2. In V1, each ORC file is treated as a single unsplittable chunk.
+!!! tip "Large CSV or JSONL files"
+    If you have a few very large CSV or JSONL files, sub-file splitting is not available. Split them into smaller files (e.g. 128–512 MiB each) to give the strategy enough chunks to balance across workers.
 
 ### Sub-File Splitting
 
-For large Parquet files, `TargetSizeSplitStrategy` generates multiple `Split` objects with disjoint `RowRange` values — a single file can be distributed across multiple workers.
+For large Parquet and ORC files, `TargetSizeSplitStrategy` generates multiple `Split` objects with disjoint `RowRange` values — a single file can be distributed across multiple workers.
 
 ```
 Split(file=DataFileInfo, row_range=None)                    # whole file
@@ -80,7 +79,9 @@ Split(file=DataFileInfo, row_range=RowRange(0, 250_000))    # rows 0–250k
 Split(file=DataFileInfo, row_range=RowRange(250_000, 250_000)) # rows 250k–500k
 ```
 
-The reader uses `pq.ParquetFile.read_row_groups()` for true random access — only the assigned row groups are read.
+For **Parquet**, the reader uses `pq.ParquetFile.read_row_groups()` — only the assigned row groups are read (true random access, row-group granularity).
+
+For **ORC**, the reader uses `ORCFile.read_stripe()` — only the assigned stripes are read (stripe granularity). Row counts are approximated uniformly since PyArrow does not expose per-stripe row counts.
 
 ## Shuffle
 
@@ -98,8 +99,91 @@ for epoch in range(num_epochs):
 ```
 
 - Call `set_epoch()` in the **main process** before each epoch
-- `shuffle=False` makes `set_epoch()` a no-op — splits are generated once and reused
-- No record-level shuffle in V1 — chunk-level shuffle is sufficient for most training workloads
+- With `shuffle=False`, `set_epoch()` can be omitted — splits are always generated in the same deterministic order regardless of epoch number
+- No record-level shuffle — chunk-level shuffle is sufficient for most training workloads
+
+## Rank-Aware DDP Sharding
+
+`num_ranks` and `rank` add a second level of partitioning above the existing worker-level splits. The hierarchy is:
+
+```
+Rank partitioning  →  Worker partitioning (within each rank)
+(num_ranks / rank)     (num_workers / split strategy)
+```
+
+All splits are generated first, then interleaved by rank:
+
+```
+rank_splits = all_splits[rank::num_ranks]
+```
+
+This means rank 0 gets splits 0, 2, 4, …; rank 1 gets splits 1, 3, 5, …; and so on. Each rank then further divides its own `rank_splits` across its `num_workers` I/O workers.
+
+### Usage
+
+```python
+import torch.distributed as dist
+
+dist.init_process_group(backend="nccl")
+
+loader, dataset = StructuredDataset.create_dataloader(
+    path="s3://bucket/data/",
+    format="parquet",
+    num_workers=4,
+    batch_size=1024,
+    shuffle=True,
+    num_ranks=dist.get_world_size(),   # total DDP ranks
+    rank=dist.get_rank(),              # this process's rank
+)
+
+for epoch in range(num_epochs):
+    dataset.set_epoch(epoch)
+    for batch in loader:
+        ...
+```
+
+### With Accelerate
+
+```python
+from accelerate import Accelerator
+
+accelerator = Accelerator()
+
+loader, dataset = StructuredDataset.create_dataloader(
+    path="s3://bucket/data/",
+    format="parquet",
+    num_workers=4,
+    batch_size=1024,
+    shuffle=True,
+    num_ranks=accelerator.num_processes,
+    rank=accelerator.process_index,
+)
+
+loader = accelerator.prepare(loader)   # optional — adds gradient sync wrappers
+```
+
+### With Horovod
+
+```python
+import horovod.torch as hvd
+
+hvd.init()
+
+loader, dataset = StructuredDataset.create_dataloader(
+    path="s3://bucket/data/",
+    format="parquet",
+    num_workers=4,
+    batch_size=1024,
+    num_ranks=hvd.size(),
+    rank=hvd.rank(),
+)
+```
+
+!!! note "Default behaviour (V1 compatible)"
+    `num_ranks=1, rank=0` are the defaults — all splits go to the single rank, identical to V1 behaviour.
+
+!!! note "Global rank vs local rank"
+    Use the **global** rank and world size (across all nodes), not the per-node local rank. In PyTorch DDP: `dist.get_rank()` is global. In Accelerate: `accelerator.process_index` is global. Local rank (`LOCAL_RANK` env var or `accelerator.local_process_index`) is the GPU index within a single node and should not be used here.
 
 ## num_workers
 
@@ -127,6 +211,8 @@ class MyStrategy:
         files: list[DataFileInfo],
         num_workers: int,
         epoch: int,
+        num_ranks: int = 1,   # optional — V1 strategies without these params still work
+        rank: int = 0,
     ) -> list[Shard]:
         ...
 
@@ -135,7 +221,7 @@ loader, _ = StructuredDataset.create_dataloader(
 )
 ```
 
-No inheritance required — implement `generate()` and you're done.
+No inheritance required — implement `generate()` and you're done. V1 strategies that do not accept `num_ranks` / `rank` continue to work — the library inspects the signature and omits those arguments if not present.
 
 ## File Metadata
 

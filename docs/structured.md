@@ -23,6 +23,8 @@ loader, dataset = StructuredDataset.create_dataloader(
     output_format="torch",                    # torch | numpy | arrow | dict
     storage_options={"key": "...", "secret": "..."},
     partitioning="hive",                      # None | "hive"
+    num_ranks=1,                              # total DDP world size (default 1 = single process)
+    rank=0,                                   # this process's global DDP rank (default 0)
 )
 ```
 
@@ -47,6 +49,8 @@ Returns `(DataLoader, dataset)`. Keep a reference to `dataset` to call `set_epoc
 | `storage_options` | `dict \| None` | `None` | Forwarded to fsspec (credentials, endpoint, etc.) |
 | `collate_fn` | `Callable \| None` | `None` | Custom DataLoader collate function |
 | `partitioning` | `str \| None` | `None` | `"hive"` decodes `key=value` directory segments as columns |
+| `num_ranks` | `int` | `1` | Total DDP world size. Default `1` = single-process (V1 behaviour) |
+| `rank` | `int` | `0` | This process's global DDP rank (0-indexed). Default `0` |
 
 ## Epoch Reshuffling
 
@@ -105,6 +109,63 @@ loader, _ = StructuredDataset.create_dataloader(
 
 !!! note "Direct constructor"
     The `ValueError` for missing `collate_fn` is raised at **constructor** time when using `StructuredDataset(...)` directly. `create_dataloader()` auto-generates a passthrough for `"numpy"` so you never need to pass one for numpy mode.
+
+## Distributed Training (DDP)
+
+Pass `num_ranks` and `rank` to shard files across DDP processes. Each rank receives an interleaved subset of all splits — rank 0 gets splits 0, 2, 4, …; rank 1 gets splits 1, 3, 5, …; and so on.
+
+### PyTorch DDP
+
+```python
+import torch.distributed as dist
+from torch_dataloader_utils import StructuredDataset
+
+dist.init_process_group(backend="nccl")
+
+loader, dataset = StructuredDataset.create_dataloader(
+    path="s3://bucket/data/",
+    format="parquet",
+    num_workers=4,
+    batch_size=1024,
+    shuffle=True,
+    num_ranks=dist.get_world_size(),
+    rank=dist.get_rank(),
+)
+
+for epoch in range(num_epochs):
+    dataset.set_epoch(epoch)
+    for batch in loader:
+        ...
+```
+
+### HuggingFace Accelerate
+
+```python
+from accelerate import Accelerator
+from torch_dataloader_utils import StructuredDataset
+
+accelerator = Accelerator()
+
+loader, dataset = StructuredDataset.create_dataloader(
+    path="s3://bucket/data/",
+    format="parquet",
+    num_workers=4,
+    batch_size=1024,
+    shuffle=True,
+    num_ranks=accelerator.num_processes,
+    rank=accelerator.process_index,     # global rank, not local_process_index
+)
+
+loader = accelerator.prepare(loader)   # optional — adds gradient sync wrappers
+
+for epoch in range(num_epochs):
+    dataset.set_epoch(epoch)
+    for batch in loader:
+        ...
+```
+
+!!! note "Global rank vs local rank"
+    Use `accelerator.process_index` (global rank across all nodes), not `accelerator.local_process_index` (GPU index within one node). The same applies to PyTorch DDP: `dist.get_rank()` is the correct global rank.
 
 ## Advanced: Direct Constructor
 

@@ -86,7 +86,8 @@ Two built-in strategies, both satisfying the `SplitStrategy` protocol:
 
 `TargetSizeSplitStrategy` behaviour:
 - **Parquet files**: reads row group metadata from the file footer (no data scan). Packs consecutive row groups into chunks targeting `split_bytes` (default 128 MiB). Each chunk is a `FileSplit` with a `RowRange` specifying the exact row range.
-- **Non-Parquet files** (ORC, CSV, JSONL): each file is treated as a single unsplittable chunk — no footer metadata available.
+- **ORC files**: reads stripe metadata from the file footer. Packs consecutive stripes into chunks targeting `split_bytes`. Row counts per stripe are approximated uniformly (`nrows / nstripes`). Each chunk is a `FileSplit` with a `RowRange` — the reader calls `ORCFile.read_stripe()` for assigned stripes.
+- **Non-splittable files** (CSV, JSONL): each file is treated as a single unsplittable chunk — no footer metadata available.
 - `split_rows` overrides `split_bytes` when both are set — produces row-count-balanced splits.
 - Chunks are distributed across workers using a greedy min-heap (LPT scheduling) — sorts largest chunks first, assigns each to the least-loaded worker. Minimises maximum worker load for unequal chunk sizes.
 
@@ -160,6 +161,8 @@ loader, dataset = StructuredDataset.create_dataloader(
     output_format="torch",                    # torch | numpy | arrow | dict
     storage_options={"key": "...", "secret": "..."},
     partitioning="hive",                      # None | "hive" — decode key=value directory segments
+    num_ranks=1,                              # total DDP world size (default 1 = single process)
+    rank=0,                                   # this process's global DDP rank (default 0)
 )
 ```
 
@@ -305,23 +308,42 @@ for epoch in range(num_epochs):
 
 `set_epoch()` must be called in the main process — not inside a worker. Workers receive the updated splits via pickling when the DataLoader starts the next epoch.
 
-When `shuffle=False`, `set_epoch()` is a no-op — splits are generated once and reused.
+When `shuffle=False`, `set_epoch()` can be omitted — splits are always generated in the same deterministic order regardless of epoch number.
 
-### V2: Accelerate-Native Integration
+### DDP / Multi-Rank Usage
 
-In V2, `create_dataloader()` will accept an `accelerator` parameter and handle DDP rank-aware split assignment automatically — each DDP rank gets a disjoint set of splits, with no overlap across ranks:
+Pass `num_ranks` and `rank` to shard files across DDP processes. Each rank gets an interleaved subset of all splits — no data overlap across ranks:
 
 ```python
-# V2 — planned
+# PyTorch DDP
+import torch.distributed as dist
+
+dist.init_process_group(backend="nccl")
 loader, dataset = StructuredDataset.create_dataloader(
     path="s3://bucket/data/",
     format="parquet",
     num_workers=4,
-    accelerator=accelerator,    # rank-aware split assignment
+    num_ranks=dist.get_world_size(),
+    rank=dist.get_rank(),
 )
 ```
 
-In V1, pass the loader to `accelerator.prepare()` after construction — Accelerate wraps the DataLoader but does not re-shard the underlying splits, so each rank reads all data. For true rank-level sharding in V1, construct separate datasets per rank using the `split_strategy` escape hatch.
+```python
+# HuggingFace Accelerate
+from accelerate import Accelerator
+
+accelerator = Accelerator()
+loader, dataset = StructuredDataset.create_dataloader(
+    path="s3://bucket/data/",
+    format="parquet",
+    num_workers=4,
+    num_ranks=accelerator.num_processes,
+    rank=accelerator.process_index,    # global rank — not local_process_index
+)
+loader = accelerator.prepare(loader)
+```
+
+`num_ranks=1, rank=0` are the defaults — identical to single-process behaviour.
 
 ---
 
@@ -404,7 +426,7 @@ True record-level shuffle requires either loading all data into memory or mainta
 - `RoundRobinSplitStrategy` — file-count balanced splits (fallback)
 - `TargetSizeSplitStrategy` — target-sized sub-file splits with LPT scheduling (default)
 - Sub-file row-range splitting for Parquet via `RowRange` — large files distributed across workers at row group granularity
-- `split_bytes` / `split_rows` parameters for tuning chunk size
+- `split_bytes` / `split_rows` parameters for tuning chunk size (strings like `"128MiB"`, `"1GiB"` accepted)
 - Auto-selection of split strategy based on file list
 - Pluggable `SplitStrategy` protocol — user-defined strategies, no inheritance needed
 - `DataFileInfo` and `IcebergDataFileInfo` for rich file metadata
@@ -421,16 +443,21 @@ True record-level shuffle requires either loading all data into memory or mainta
 
 ## V2 Scope
 
+**Released:**
+
+- ORC sub-file splitting — stripe-boundary chunks via `RowRange`, reader uses `ORCFile.read_stripe()`
+- ORC support for Iceberg tables — `_detect_format` handles ORC-backed Iceberg tables
+- Rank-aware DDP sharding — `num_ranks` / `rank` params on `TargetSizeSplitStrategy`, `RoundRobinSplitStrategy`, `StructuredDataset`, and `IcebergDataset`; interleaved assignment `all_splits[rank::num_ranks]`
+- Multi-worker DataLoader integration tests on Linux CI
+
+**Pending:**
+
 - Record-level shuffle via configurable shuffle buffer
 - Row-level interleaving across files within a split
 - Mid-epoch checkpoint and resume — persist which splits have been fully consumed so that on crash/restart the DataLoader can skip already-processed splits and resume from the partial one; epoch number checkpointed alongside model weights for deterministic shuffle resumption
-- Accelerate-native integration — rank-aware split assignment so each DDP rank gets a disjoint set of splits with no cross-rank data overlap; `accelerator` parameter on `create_dataloader()`
-- Horovod and DeepSpeed rank-aware split assignment (same mechanism as Accelerate)
-- GCS and Azure real backend CI tests — S3 (moto) covers the shared fsspec/PyFileSystem code path in V1; V2 adds Docker Compose-based GCS (fake-gcs-server) and Azure (Azurite) CI tests to catch per-backend auth, path format, and stat() response differences
-- Real multi-worker DataLoader integration tests on Linux CI — macOS spawn mode causes deadlocks with pyarrow generators; Linux fork mode works correctly
+- GCS and Azure real backend CI tests — Docker Compose-based GCS (`fake-gcs-server`) and Azure (Azurite)
 - Metrics: rows read, bytes read, worker utilization
-- Build stateful dataloader state_dict() / load_state_dict() to checkpointing/resuming a crash
-- ORC support for Iceberg
+- Build stateful dataloader `state_dict()` / `load_state_dict()` for checkpointing/resuming
 
 ## V3 Scope
 

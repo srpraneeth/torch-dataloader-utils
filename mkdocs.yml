@@ -44,5 +44,6 @@ nav:
   - How It Works:
     - Splits & Workers: splits.md
     - Training Stack: training.md
+    - Distributed Data Loading: distributed.md
   - Limitations: limitations.md
   - Roadmap: roadmap.md

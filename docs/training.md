@@ -42,8 +42,18 @@ for epoch in range(num_epochs):
 from accelerate import Accelerator
 
 accelerator = Accelerator()
-loader, dataset = StructuredDataset.create_dataloader(...)
-loader = accelerator.prepare(loader)
+
+loader, dataset = StructuredDataset.create_dataloader(
+    path="s3://bucket/data/",
+    format="parquet",
+    num_workers=4,
+    batch_size=1024,
+    shuffle=True,
+    num_ranks=accelerator.num_processes,
+    rank=accelerator.process_index,
+)
+
+loader = accelerator.prepare(loader)   # optional — adds gradient sync wrappers
 
 for epoch in range(num_epochs):
     dataset.set_epoch(epoch)
@@ -51,8 +61,67 @@ for epoch in range(num_epochs):
         ...
 ```
 
-!!! note "V1 limitation"
-    In V1, `accelerator.prepare()` wraps the DataLoader but does not re-shard the underlying splits — each DDP rank reads all data. For true rank-level sharding, construct separate datasets per rank using the `split_strategy` escape hatch. V2 will add native `accelerator` parameter support with automatic rank-aware split assignment.
+## DDP / Multi-Rank Usage
+
+### PyTorch DDP
+
+```python
+import torch.distributed as dist
+from torch_dataloader_utils import StructuredDataset
+
+dist.init_process_group(backend="nccl")
+
+loader, dataset = StructuredDataset.create_dataloader(
+    path="s3://bucket/data/",
+    format="parquet",
+    num_workers=4,
+    batch_size=1024,
+    shuffle=True,
+    num_ranks=dist.get_world_size(),   # total DDP ranks
+    rank=dist.get_rank(),              # this process's rank
+)
+
+for epoch in range(num_epochs):
+    dataset.set_epoch(epoch)
+    for batch in loader:
+        optimizer.zero_grad()
+        loss = model(batch["feature_a"], batch["label"])
+        loss.backward()
+        optimizer.step()
+```
+
+### Accelerate (full example)
+
+```python
+from accelerate import Accelerator
+from torch_dataloader_utils import StructuredDataset
+
+accelerator = Accelerator()
+model, optimizer = accelerator.prepare(model, optimizer)
+
+loader, dataset = StructuredDataset.create_dataloader(
+    path="s3://bucket/data/",
+    format="parquet",
+    num_workers=4,
+    batch_size=1024,
+    shuffle=True,
+    num_ranks=accelerator.num_processes,
+    rank=accelerator.process_index,    # global rank — NOT local_process_index
+)
+
+loader = accelerator.prepare(loader)
+
+for epoch in range(num_epochs):
+    dataset.set_epoch(epoch)
+    for batch in loader:
+        optimizer.zero_grad()
+        loss = model(batch["feature_a"], batch["label"])
+        accelerator.backward(loss)
+        optimizer.step()
+```
+
+!!! note "Global rank vs local rank"
+    Always pass the **global** rank to `rank=`. In Accelerate: `accelerator.process_index`. In PyTorch DDP: `dist.get_rank()`. The local rank (`accelerator.local_process_index`, `LOCAL_RANK` env var) is the GPU index within a single node and should not be used for file sharding.
 
 ## Why `batch_size=None`?
 

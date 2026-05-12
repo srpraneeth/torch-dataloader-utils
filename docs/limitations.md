@@ -1,20 +1,5 @@
 # Limitations
 
-## DDP / Multi-GPU Rank Sharding
-
-In V1, each DDP rank runs its own `DataLoader` that reads the **full dataset**. `accelerator.prepare()` wraps the DataLoader but does not re-partition the underlying files across ranks.
-
-```
-V1 behavior:
-  Rank 0: DataLoader → reads ALL files → trains on its half of batches
-  Rank 1: DataLoader → reads ALL files → trains on its half of batches
-  → full dataset I/O per rank, I/O cost scales with rank count
-```
-
-For true rank-level file partitioning in V1, use the `split_strategy` escape hatch to build separate `StructuredDataset` instances per rank with disjoint file assignments.
-
-V2 will add a native `accelerator` parameter to `create_dataloader()` that handles this automatically.
-
 ## No Record-Level Shuffle
 
 Shuffle operates at the **chunk level** (row group or file granularity), not at the individual row level. Within a chunk, rows are always read in their storage order.
@@ -23,11 +8,11 @@ This is intentional: record-level shuffle would require reading an entire row gr
 
 If record-level shuffle is required, pre-shuffle your data files before training.
 
-## ORC: No Sub-File Splitting
+## ORC: Approximate Row Counts in Sub-File Splitting
 
-ORC files are treated as a single unsplittable chunk per file. Multiple ORC files are still load-balanced across workers by file size using LPT scheduling — the limitation is only that a **single large ORC file cannot be split across workers**.
+ORC files are split at stripe boundaries. Because PyArrow does not expose per-stripe row counts in the file footer, row counts are **approximated uniformly** as `total_rows / num_stripes`. This means LPT scheduling for ORC is based on approximate row counts rather than exact ones.
 
-ORC does have stripes with footer metadata (row counts, byte offsets) — sub-file splitting is technically feasible and planned for V2. In V1, for good parallelism, partition large ORC files into smaller ones (128–512 MiB each) so the scheduler has enough chunks to balance.
+In practice, stripes within a single ORC file tend to be similar in size, so the approximation is close. If your ORC files have very unequal stripe sizes, the worker assignment may be slightly imbalanced.
 
 ## CSV / JSON / JSONL: No Sub-File Splitting
 

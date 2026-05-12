@@ -29,10 +29,19 @@ The system SHALL raise a clear `ValueError` when an unsupported format is passed
 ### Reading `[v1]`
 The system SHALL accept a `Split` and yield `pyarrow.RecordBatch` objects.
 The system SHALL read files in the order they appear in `split.file_splits`.
-The system SHALL read each file fully when `FileSplit.row_range` is `None` (V1).
-The system SHALL use `pyarrow.dataset.dataset()` as the reading backend.
+The system SHALL read each file fully when `FileSplit.row_range` is `None`.
+The system SHALL use `pyarrow.dataset.dataset()` as the reading backend for whole-file reads.
 The system SHALL pass `filesystem` to `pyarrow.dataset.dataset()` to support fsspec backends.
 The system SHALL reconstruct the fsspec filesystem from the file path and `storage_options` at read time — not accept a filesystem object as input.
+
+### Parquet Row-Range Reading `[v2]`
+When `FileSplit.row_range` is set and the format is `parquet`, the system SHALL use `pq.ParquetFile.read_row_groups()` to read only the assigned row groups (true random access — no full scan).
+The system SHALL walk cumulative row group row counts to resolve which row groups are covered by the `RowRange`.
+Partition columns (Hive path segments) SHALL be parsed from the file path and attached as constant columns on each yielded batch, matching the whole-file scanner path behaviour.
+
+### ORC Row-Range Reading `[v2]`
+When `FileSplit.row_range` is set and the format is `orc`, the system SHALL use `ORCFile.read_stripe()` to read only the assigned stripes (true random access — no full scan).
+The system SHALL derive which stripe indices are assigned from the `RowRange` (offset and length in approximate rows, aligned to stripe boundaries at generation time).
 
 ### Column Projection `[v1]`
 The system SHALL accept an optional `columns` parameter (`list[str] | None`).
@@ -112,6 +121,8 @@ def read_split(
 **Hive partitioning — scanner path** — file at `data/region=us/year=2024/part.parquet`, `partitioning="hive"` → batches include `region="us"` and `year="2024"` as extra columns
 
 **Hive partitioning — row-range path** — large Parquet file at `data/region=eu/part.parquet` read via `RowRange` → batches include `region="eu"` constant column
+
+**ORC row-range reading** — ORC file with 4 stripes, `RowRange(offset=stripe2_start, length=2_stripes_rows)` → only stripes 2 and 3 read; no rows from stripes 0 or 1 returned
 
 **No partitioning** — `partitioning=None` (default) → partition-encoded directory values NOT injected as columns
 

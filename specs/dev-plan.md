@@ -82,6 +82,8 @@
 - [x] Publish `0.1.0` to PyPI
 - [x] Set up GitHub Actions docs deploy workflow (push to main → GitHub Pages)
 
+---
+
 ## V2 Tasks
 
 ### 10. ORC Sub-File Splitting
@@ -101,7 +103,7 @@
 - [x] Add `num_ranks`, `rank` to `IcebergDataset.__init__()` and `create_dataloader()`
 - [x] Backward-compat: detect V1 strategy signatures via `inspect.signature` and skip rank params
 - [x] Write unit tests for rank distribution, shuffle determinism, edge cases (empty ranks, uneven splits)
-- [x] Write integration tests: torchrun multi-rank correctness, ORC rank-aware sharding
+- [x] Write integration tests: mp.spawn multi-rank correctness, ORC rank-aware sharding
 - [x] Write integration tests: Iceberg rank-aware sharding (2 ranks, 3 ranks, more ranks than files)
 
 ### 12. `parse_bytes` String Form
@@ -113,6 +115,58 @@
 - [x] Expand `docs/iceberg.md` with delete file warning and how-it-works diagram
 - [x] Update `README.md` Challenges section with delete file limitations
 
-### 14. Infrastructure (deferred)
+### 14. Benchmark Suite
+- [ ] Throughput benchmark: rows/sec and batches/sec vs. naive `IterableDataset`, `torchdata`, WebDataset
+- [ ] I/O amplification benchmark: bytes read per training sample across 1/4/8 workers and 1/4 ranks
+- [ ] Startup latency benchmark: time from `create_dataloader()` to first batch vs. file count and format
+- [ ] GPU utilization benchmark: DataLoader stall fraction under simulated S3 latency
+- [ ] Shuffle overhead benchmark: wall time of `set_epoch()` as split count grows
+- [ ] Publish benchmark results in docs
+
+### 15. Mid-Epoch Checkpoint and Resume
+- [ ] Persist per-worker split consumption state via `state_dict()` / `load_state_dict()`
+- [ ] Checkpoint epoch number alongside model weights for deterministic shuffle resumption
+- [ ] Resume from partial split (skip fully-consumed splits, seek within partial split)
+- [ ] Write tests: crash-resume produces same rows as uninterrupted run
+- [ ] Write tests: checkpoint round-trips correctly across `DataLoader` restarts
+
+### 16. Shuffle Improvements
+- [ ] Record-level shuffle via configurable in-memory shuffle buffer (tunable buffer size)
+- [ ] Row-level interleaving across files within a split
+- [ ] Write tests: buffer shuffle produces different row order than chunk shuffle
+- [ ] Write tests: interleaving yields rows from multiple files before finishing any one file
+
+### 17. Observability
+- [ ] Expose per-worker metrics: rows read, bytes read, utilization, idle time
+- [ ] Structured log output by default
+- [ ] Optional Prometheus metrics export
+- [ ] Write tests: metrics are non-zero after iteration, values are consistent with data size
+
+### 18. Delta Lake Support
+- [ ] Implement `DeltaDataset` via `delta-rs` — resolve snapshot to data files, hand off to existing split/read pipeline
+- [ ] Add `delta` optional extra to `pyproject.toml`
+- [ ] Write integration tests with a local Delta table fixture
+- [ ] Document in `docs/` alongside `IcebergDataset`
+
+### 19. Infrastructure
 - [ ] Real GCS tests (fake-gcs-server) via Docker Compose in CI
 - [ ] Real Azure tests (Azurite) via Docker Compose in CI
+
+---
+
+## V3 Tasks
+
+### 20. Adaptive Dynamic Splitting
+- [ ] Monitor per-worker split consumption rate during iteration
+- [ ] Rebalance remaining splits to idle workers when imbalance exceeds threshold
+- [ ] Write tests: heterogeneous file sizes converge to balanced completion times
+
+### 21. Memory-Aware Batching
+- [ ] Adaptive batch sizing based on available memory and observed row width
+- [ ] Bounded buffer for variable-width rows (embeddings, sparse features)
+- [ ] Write tests: no OOM on wide batches, batch size adjusts within configured bounds
+
+### 22. Schema Validation and Evolution
+- [ ] Validate column names, types, nullability against user-provided schema at `create_dataloader()` time
+- [ ] Handle schema evolution across files (new columns in later partitions — fill with null or raise)
+- [ ] Write tests: mismatched schema raises early, evolved schema handled gracefully

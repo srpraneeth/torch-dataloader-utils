@@ -196,8 +196,9 @@ class TargetSizeSplitStrategy:
       columns across all files) because row count is the exact measure of work.
       When both are provided, ``target_rows`` takes precedence.
 
-    For non-Parquet files (ORC, CSV, JSONL) the entire file is treated as a
-    single unsplittable chunk and distributed whole to one worker.
+    For ORC files, chunks are aligned to stripe boundaries using a uniform row-count
+    approximation (``nrows / nstripes``) since PyArrow does not expose per-stripe
+    sizes. For CSV and JSONL the entire file is treated as a single unsplittable chunk.
 
     Chunks are assigned to workers using a greedy min-heap (LPT scheduling) —
     always assign the next chunk to the least-loaded worker. This is optimal

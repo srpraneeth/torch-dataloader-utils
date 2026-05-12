@@ -64,6 +64,11 @@ delegate all iteration, split generation, and output conversion to it.
 `IcebergDataset.create_dataloader()` SHALL return `(DataLoader, IcebergDataset)`.
 The `IcebergDataset` instance SHALL expose `set_epoch()` by delegating to the inner dataset.
 
+### Rank-Aware Sharding `[v2]`
+`IcebergDataset` SHALL accept `num_ranks` and `rank` and forward them to `StructuredDataset`.
+The interleaved rank partitioning (`all_splits[rank::num_ranks]`) is applied inside the split strategy — `IcebergDataset` itself does not implement sharding.
+When a V1 custom strategy is passed (no `num_ranks`/`rank` params detected via `inspect.signature`), `IcebergDataset` SHALL call the strategy with the V1 three-argument signature and skip rank partitioning for that strategy.
+
 ### Format `[v1]`
 Format is always `"parquet"` — Iceberg data files are Parquet (or ORC).
 `IcebergDataset` SHALL detect the format from the file extensions in the scan result.
@@ -94,6 +99,8 @@ class IcebergDataset:
         num_workers: int = 1,
         output_format: str = "torch",
         collate_fn: Callable | None = None,
+        num_ranks: int = 1,
+        rank: int = 0,
     ) -> None: ...
 
     def set_epoch(self, epoch: int) -> None: ...
@@ -115,6 +122,8 @@ class IcebergDataset:
         num_workers: int | None = None,
         output_format: str = "torch",
         collate_fn: Callable | None = None,
+        num_ranks: int = 1,
+        rank: int = 0,
     ) -> tuple[DataLoader, "IcebergDataset"]: ...
 ```
 
@@ -135,3 +144,7 @@ class IcebergDataset:
 **Missing pyiceberg** — `pyiceberg` not installed → `ImportError` with `pip install torch-dataloader-utils[iceberg]`
 
 **No rows dropped or duplicated** — 3 files × 100 rows, row_id 0–299, `num_workers=0` → set of all row_ids equals exactly {0..299}
+
+**Rank-aware sharding** — 3 files × 100 rows, `num_ranks=2, rank=0`, `num_workers=0` → row_ids cover exactly the rank-0 subset; rank=1 covers the complement; union = {0..299} with no overlap
+
+**V1 custom strategy backward compat** — strategy with `generate(files, num_workers, epoch)` signature passed as `split_strategy=`, `num_ranks=2` → strategy called without `num_ranks`/`rank`; receives all files regardless of rank

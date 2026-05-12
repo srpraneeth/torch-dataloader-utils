@@ -103,17 +103,19 @@ A *split* (called a `Shard` internally) is a worker's read assignment — the li
 |--------|-------------------|-------------------|
 | Parquet | Row group (from footer metadata) | Yes — one file → many chunks |
 | Iceberg | Resolves to Parquet data files → same as Parquet | Yes |
-| ORC | Whole file | No — one file = one chunk |
+| ORC | Stripe (uniform row-count approximation) | Yes — stripe-boundary chunks |
 | CSV / JSON / JSONL | Whole file | No — one file = one chunk |
 
-For Parquet and Iceberg, footer metadata is scanned once in the main process (no data read) to determine row group sizes, then row groups are packed into target-sized chunks. For ORC and text formats, each file becomes one unsplittable chunk — so for good parallelism, shard large ORC/CSV files into many smaller ones.
+For Parquet and Iceberg, footer metadata is scanned once in the main process (no data read) to determine row group sizes, then row groups are packed into target-sized chunks. For ORC, stripe metadata is read from the file footer and stripes are packed into chunks — the reader uses `ORCFile.read_stripe()` for assigned stripes (true random access). ORC row counts per stripe are approximated uniformly since PyArrow does not expose per-stripe counts. For CSV and text formats, each file becomes one unsplittable chunk — so for good parallelism, shard large files into many smaller ones.
 
 ```
-Parquet example — 3 files with different sizes:
+Parquet / ORC example — 3 files with different sizes:
 
 File A: 3 row groups  →  chunk A1 (rg 0-1), chunk A2 (rg 2)
 File B: 2 row groups  →  chunk B1 (rg 0-1)
 File C: 4 row groups  →  chunk C1 (rg 0-1), chunk C2 (rg 2-3)
+
+(ORC works the same way, with stripes in place of row groups)
 
 All chunks: [A1, A2, B1, C1, C2]
   → shuffle (optional)
@@ -129,7 +131,7 @@ The assignment is serialized into each worker's initializer — workers receive 
 See [Splits & Workers](splits.md) for full details on split strategies, sub-file splitting, shuffle, and tuning chunk size.
 
 - **File-level sharding at startup** — splits are assigned once in the main process at `create_dataloader()` time, before any worker spawns. Workers never coordinate.
-- **Sub-file splitting for large Parquet** — a single 10 GB file can be split across multiple workers at row group boundaries; each worker reads a disjoint range sequentially.
+- **Sub-file splitting for large Parquet and ORC** — a single 10 GB file can be split across multiple workers at row group or stripe boundaries; each worker reads a disjoint range sequentially.
 - **Each byte read exactly once** — no worker reads a file another worker owns. No amplification regardless of how many workers or ranks you use.
 - **Standard `DataLoader` output** — returns a plain `torch.utils.data.DataLoader`. Nothing else in your training stack changes. Works with Accelerate, FSDP, DDP unchanged.
 - **Epoch-level shuffle** — chunks are shuffled before assignment each epoch via `dataset.set_epoch(epoch)`, giving good randomness without record-level I/O overhead.
