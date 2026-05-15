@@ -24,3 +24,8 @@ htmlcov/
 
 # OS
 .DS_Store
+
+# docs
+site/
+# Benchmark timestamped results (keep only baseline.json)
+benchmarks/results/[0-9]*.json

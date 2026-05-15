@@ -199,31 +199,50 @@ def _read_parquet_row_range(
     if not rg_indices:
         return
 
-    # Read without column projection first when a filter references columns not in `columns`.
-    # Apply filter on the full set of columns, then project down.
-    read_columns = None if (filters is not None and columns is not None) else columns
-    table = pf.read_row_groups(rg_indices, columns=read_columns)
-
-    if filters is not None:
-        table = table.filter(filters)
-
-    if filters is not None and columns is not None:
-        table = table.select(columns)
-
-    # Attach Hive partition columns if requested
+    hive_parts: dict[str, str] = {}
     if partitioning == "hive":
         hive_parts = _parse_hive_partitions(original_path)
-        for col_name, col_value in hive_parts.items():
-            if col_name not in table.schema.names:
-                table = table.append_column(
-                    col_name,
-                    pa.array([col_value] * len(table), type=pa.string()),
-                )
 
-    # Yield in batch_size chunks
-    for batch in table.to_batches(max_chunksize=batch_size):
-        if batch.num_rows > 0:
-            yield batch
+    # Use iter_batches for streaming independent RecordBatches.
+    # Slices from read_row_groups().to_batches() carry the full table buffer when
+    # pickled for DataLoader IPC (97× size overhead). iter_batches produces
+    # independently allocated batches that pickle at their actual size.
+    #
+    # When a filter is set, read full columns and apply the filter per batch
+    # via a single-batch Table (small: batch_size rows, not the whole chunk).
+    # When a filter is set AND column projection is needed, project after filtering.
+    read_columns = None if (filters is not None and columns is not None) else columns
+
+    for batch in pf.iter_batches(batch_size, row_groups=rg_indices, columns=read_columns):
+        if filters is not None:
+            batch_table = pa.Table.from_batches([batch])
+            batch_table = batch_table.filter(filters)
+            if columns is not None:
+                batch_table = batch_table.select(columns)
+            if hive_parts:
+                for col_name, col_value in hive_parts.items():
+                    if col_name not in batch_table.schema.names:
+                        batch_table = batch_table.append_column(
+                            col_name,
+                            pa.array([col_value] * len(batch_table), type=pa.string()),
+                        )
+            for b in batch_table.to_batches(max_chunksize=batch_size):
+                if b.num_rows > 0:
+                    yield b
+        elif hive_parts:
+            batch_table = pa.Table.from_batches([batch])
+            for col_name, col_value in hive_parts.items():
+                if col_name not in batch_table.schema.names:
+                    batch_table = batch_table.append_column(
+                        col_name,
+                        pa.array([col_value] * len(batch_table), type=pa.string()),
+                    )
+            for b in batch_table.to_batches(max_chunksize=batch_size):
+                if b.num_rows > 0:
+                    yield b
+        else:
+            if batch.num_rows > 0:
+                yield batch
 
 
 def _read_orc_row_range(
