@@ -1,3 +1,4 @@
+from torch_dataloader_utils.dataset.base import CheckpointMismatchError
 from torch_dataloader_utils.dataset.iceberg import IcebergDataset
 from torch_dataloader_utils.dataset.structured import StructuredDataset
 from torch_dataloader_utils.splits import (
@@ -10,6 +11,7 @@ from torch_dataloader_utils.splits import (
 )
 
 __all__ = [
+    "CheckpointMismatchError",
     "DataFileInfo",
     "IcebergDataFileInfo",
     "Split",

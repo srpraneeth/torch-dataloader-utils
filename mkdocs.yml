@@ -48,6 +48,7 @@ nav:
     - Training Stack: training.md
     - Distributed Data Loading: distributed.md
   - Observability: observability.md
+  - Checkpoint & Resume: checkpoint.md
   - Benchmarks: benchmarks.md
   - Limitations: limitations.md
   - Roadmap: roadmap.md

@@ -23,11 +23,56 @@ from torch_dataloader_utils.splits.core import Shard
 logger = logging.getLogger(__name__)
 
 
+class CheckpointMismatchError(Exception):
+    """Raised by load_state_dict when stored shard content doesn't match current splits.
+
+    Indicates that num_workers, shuffle_seed, or the file list changed between
+    the checkpoint and the current dataset construction.
+    """
+
+    def __init__(
+        self,
+        shard_state: dict,
+        full_state: dict,
+        current_num_workers: int,
+        current_shuffle_seed: int | None,
+    ) -> None:
+        splits_desc = "\n".join(
+            f"    {s['path']}  rows [{s['row_offset']:,}, {s['row_offset'] + s['row_length']:,})"
+            if s["row_offset"] is not None
+            else f"    {s['path']}  full file"
+            for s in shard_state["splits"]
+        )
+        saved_nw = full_state.get("_num_workers", "?")
+        saved_seed = full_state.get("_shuffle_seed", "?")
+
+        hints = []
+        if saved_nw != "?" and saved_nw != current_num_workers:
+            hints.append(
+                f"num_workers changed: checkpoint={saved_nw}, current={current_num_workers}"
+            )
+        if saved_seed != "?" and saved_seed != current_shuffle_seed:
+            hints.append(
+                f"shuffle_seed changed: checkpoint={saved_seed}, current={current_shuffle_seed}"
+            )
+        if not hints:
+            hints.append("file list may have changed since the checkpoint was saved")
+
+        hint_str = "\n  ".join(hints)
+        super().__init__(
+            f"Checkpoint shard does not match any current split.\n\n"
+            f"  Checkpoint shard:\n{splits_desc}\n\n"
+            f"  Likely cause: {hint_str}\n\n"
+            f"  Reconstruct the dataset with matching parameters or discard this checkpoint."
+        )
+
+
 class BaseDataset(IterableDataset, ABC):
     """Shared infrastructure for all torch-dataloader-utils datasets.
 
     Provides observability (metrics, progress bars, split logging), epoch reshuffling,
-    and the DataLoader __iter__ lifecycle. Subclasses implement _iter_shard() only.
+    checkpoint/resume, and the DataLoader __iter__ lifecycle. Subclasses implement
+    _iter_shard() only.
 
     Required: before calling _init_splits_and_observability(), subclasses must set:
         self._files, self._strategy, self._num_workers, self._num_ranks, self._rank,
@@ -49,6 +94,7 @@ class BaseDataset(IterableDataset, ABC):
         # - num_workers>0: workers are separate processes — use mp.Queue.
         self._metrics_local: list[WorkerMetrics] = []
         self._metrics_queue: multiprocessing.Queue = multiprocessing.Queue()
+        self._completed_workers: set[int] = set()
         self._splits: list[Shard] = self._generate_splits()
 
     def _generate_splits(self) -> list[Shard]:
@@ -70,6 +116,7 @@ class BaseDataset(IterableDataset, ABC):
     def set_epoch(self, epoch: int) -> None:
         """Set the epoch for shuffle reproducibility. Call before each epoch when shuffle=True."""
         self.reset_metrics()
+        self._completed_workers = set()
         self._epoch = epoch
         self._splits = self._generate_splits()
         logger.info(
@@ -99,6 +146,106 @@ class BaseDataset(IterableDataset, ABC):
             except queue.Empty:
                 break
 
+    # ------------------------------------------------------------------
+    # Checkpoint / resume
+    # ------------------------------------------------------------------
+
+    def state_dict(self) -> dict:
+        """Return serialisable checkpoint state capturing completed shards.
+
+        Save alongside model.state_dict(). On resume call load_state_dict()
+        before the DataLoader begins iterating — completed shards will be
+        skipped with zero I/O.
+        """
+        self._drain_to_completed()
+        completed_shards = []
+        for worker_id in sorted(self._completed_workers):
+            shard = self._splits[worker_id]
+            completed_shards.append(
+                {
+                    "splits": [
+                        {
+                            "path": fs.file.path,
+                            "row_offset": fs.row_range.offset if fs.row_range else None,
+                            "row_length": fs.row_range.length if fs.row_range else None,
+                        }
+                        for fs in shard.splits
+                    ]
+                }
+            )
+        return {
+            "epoch": self._epoch,
+            "_num_workers": self._num_workers,
+            "_shuffle_seed": getattr(self, "_shuffle_seed", None),
+            "completed_shards": completed_shards,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore checkpoint state and validate against current splits.
+
+        Raises CheckpointMismatchError if any stored shard cannot be matched
+        to the current split assignments — indicating that num_workers,
+        shuffle_seed, or the file list changed since the checkpoint was saved.
+
+        Call this instead of set_epoch() for the resumed epoch.
+        """
+        self.reset_metrics()
+        self._completed_workers = set()
+        self._epoch = state["epoch"]
+        self._splits = self._generate_splits()
+
+        for shard_state in state["completed_shards"]:
+            worker_id = self._match_shard(shard_state, state)
+            self._completed_workers.add(worker_id)
+
+        logger.info(
+            "Resumed from checkpoint: epoch=%d  completed=%d/%d shards  skipped=%s",
+            self._epoch,
+            len(self._completed_workers),
+            len(self._splits),
+            sorted(self._completed_workers),
+        )
+
+    def _match_shard(self, shard_state: dict, full_state: dict) -> int:
+        """Find the worker ID whose current shard content matches shard_state.
+
+        Raises CheckpointMismatchError if no match is found.
+        """
+        target = shard_state["splits"]
+        for shard in self._splits:
+            candidate = [
+                {
+                    "path": fs.file.path,
+                    "row_offset": fs.row_range.offset if fs.row_range else None,
+                    "row_length": fs.row_range.length if fs.row_range else None,
+                }
+                for fs in shard.splits
+            ]
+            if candidate == target:
+                return shard.id
+        raise CheckpointMismatchError(
+            shard_state,
+            full_state,
+            current_num_workers=self._num_workers,
+            current_shuffle_seed=getattr(self, "_shuffle_seed", None),
+        )
+
+    def _drain_to_completed(self) -> None:
+        """Drain the metrics queue and record finished worker IDs without discarding metrics."""
+        for m in self._metrics_local:
+            self._completed_workers.add(m.worker_id)
+        while True:
+            try:
+                m = self._metrics_queue.get_nowait()
+                self._metrics_local.append(m)  # keep available for get_metrics()
+                self._completed_workers.add(m.worker_id)
+            except queue.Empty:
+                break
+
+    # ------------------------------------------------------------------
+    # Progress bars
+    # ------------------------------------------------------------------
+
     def _make_pbar(self, worker_id: int) -> Any:
         if not self._show_progress:
             return None
@@ -112,6 +259,10 @@ class BaseDataset(IterableDataset, ABC):
             maxinterval=self._progress_interval_sec,
             unit="rows",
         )
+
+    # ------------------------------------------------------------------
+    # DataLoader iteration lifecycle
+    # ------------------------------------------------------------------
 
     def __iter__(self) -> Iterator[Any]:
         from torch.utils.data import get_worker_info
@@ -127,6 +278,13 @@ class BaseDataset(IterableDataset, ABC):
                 worker_id,
                 len(self._splits),
                 self._num_workers,
+            )
+            return
+
+        if worker_id in self._completed_workers:
+            logger.debug(
+                "Worker %d: shard already completed — skipping (resumed from checkpoint)",
+                worker_id,
             )
             return
 

@@ -469,14 +469,13 @@ True record-level shuffle requires either loading all data into memory or mainta
 - Rank-aware DDP sharding — `num_ranks` / `rank` params on `TargetSizeSplitStrategy`, `RoundRobinSplitStrategy`, `StructuredDataset`, and `IcebergDataset`; interleaved assignment `all_splits[rank::num_ranks]`
 - Multi-worker DataLoader integration tests on Linux CI
 - Observability — `WorkerMetrics` per worker (`rows_read`, `bytes_read`, `files_read`, `elapsed_sec`), epoch summary at INFO, load-balance warning, optional `tqdm` progress bars via `show_progress`; `dataset.get_metrics()` returns structured results; `BaseDataset` ABC provides this to all current and future datasets automatically
+- Mid-epoch checkpoint and resume — `dataset.state_dict()` captures completed shard content (file paths + row ranges, not just worker IDs); `dataset.load_state_dict(state)` validates against current splits and raises `CheckpointMismatchError` with a specific diagnosis if `num_workers`, `shuffle_seed`, or the file list changed; completed shards skipped with zero I/O on resume; at most one in-progress shard re-reads from scratch
 
 **Pending:**
 
 - Record-level shuffle via configurable shuffle buffer
 - Row-level interleaving across files within a split
-- Mid-epoch checkpoint and resume — persist which splits have been fully consumed so that on crash/restart the DataLoader can skip already-processed splits and resume from the partial one; epoch number checkpointed alongside model weights for deterministic shuffle resumption
 - GCS and Azure real backend CI tests — Docker Compose-based GCS (`fake-gcs-server`) and Azure (Azurite)
-- Build stateful dataloader `state_dict()` / `load_state_dict()` for checkpointing/resuming
 
 ## V3 Scope
 
