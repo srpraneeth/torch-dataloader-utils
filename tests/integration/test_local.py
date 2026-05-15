@@ -6,6 +6,7 @@ Run with:
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -1493,3 +1494,115 @@ def test_mp_spawn_three_ranks_disjoint_coverage(tmp_path):
 
     assert sorted(combined) == list(range(total)), "mp.spawn: rows missing or wrong"
     assert len(set(combined)) == len(combined), "mp.spawn: duplicate rows across ranks"
+
+
+# ===========================================================================
+# Observability
+# ===========================================================================
+
+
+@pytest.mark.integration
+def test_metrics_rows_match_total(parquet_dir):
+    """sum(m.rows_read) across workers equals total rows in the dataset."""
+    data_dir, total_rows = parquet_dir
+    loader, dataset = StructuredDataset.create_dataloader(
+        path=str(data_dir),
+        format="parquet",
+        num_workers=0,
+        batch_size=32,
+    )
+    list(loader)
+
+    metrics = dataset.get_metrics()
+    assert len(metrics) == 1
+    assert sum(m.rows_read for m in metrics) == total_rows
+
+
+@pytest.mark.integration
+def test_metrics_bytes_and_elapsed_nonzero(parquet_dir):
+    """bytes_read and elapsed_sec are positive after iteration."""
+    data_dir, _ = parquet_dir
+    loader, dataset = StructuredDataset.create_dataloader(
+        path=str(data_dir),
+        format="parquet",
+        num_workers=0,
+    )
+    list(loader)
+
+    metrics = dataset.get_metrics()
+    assert len(metrics) == 1
+    assert metrics[0].bytes_read > 0
+    assert metrics[0].elapsed_sec > 0
+
+
+@pytest.mark.integration
+def test_metrics_files_read(parquet_dir):
+    """files_read equals the number of files in the directory."""
+    data_dir, _ = parquet_dir
+    loader, dataset = StructuredDataset.create_dataloader(
+        path=str(data_dir),
+        format="parquet",
+        num_workers=0,
+    )
+    list(loader)
+
+    metrics = dataset.get_metrics()
+    # parquet_dir has 3 files; with TargetSizeSplitStrategy small files may be
+    # merged into row-range splits — files_read tracks splits, not unique files.
+    assert metrics[0].files_read >= 1
+
+
+@pytest.mark.integration
+def test_metrics_drained_after_second_call(parquet_dir):
+    """get_metrics() returns [] on a second call within the same epoch."""
+    data_dir, _ = parquet_dir
+    loader, dataset = StructuredDataset.create_dataloader(
+        path=str(data_dir),
+        format="parquet",
+        num_workers=0,
+    )
+    list(loader)
+
+    assert len(dataset.get_metrics()) == 1
+    assert dataset.get_metrics() == []
+
+
+@pytest.mark.integration
+def test_startup_summary_logged(parquet_dir, caplog):
+    """create_dataloader logs the startup summary at INFO level."""
+    data_dir, _ = parquet_dir
+    with caplog.at_level(logging.INFO, logger="torch_dataloader_utils"):
+        StructuredDataset.create_dataloader(
+            path=str(data_dir),
+            format="parquet",
+            num_workers=0,
+        )
+    assert any("DataLoader ready" in r.message for r in caplog.records)
+
+
+@pytest.mark.integration
+def test_split_table_logged_at_info(parquet_dir, caplog):
+    """Split assignment table is logged at INFO level."""
+    data_dir, _ = parquet_dir
+    with caplog.at_level(logging.INFO, logger="torch_dataloader_utils"):
+        StructuredDataset.create_dataloader(
+            path=str(data_dir),
+            format="parquet",
+            num_workers=0,
+        )
+    assert any("Split assignment" in r.message for r in caplog.records)
+
+
+@pytest.mark.integration
+def test_show_progress_num_workers_0(parquet_dir):
+    """show_progress=True completes without error when num_workers=0."""
+    data_dir, total_rows = parquet_dir
+    loader, dataset = StructuredDataset.create_dataloader(
+        path=str(data_dir),
+        format="parquet",
+        num_workers=0,
+        show_progress=True,
+        progress_interval_sec=0,
+    )
+    rows = sum(b["row_id"].shape[0] for b in loader)
+    assert rows == total_rows

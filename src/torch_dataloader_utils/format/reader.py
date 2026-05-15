@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import logging
+import time
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import fsspec
 import pyarrow as pa
@@ -10,6 +13,7 @@ import pyarrow.fs as pafs
 import pyarrow.orc as orc
 import pyarrow.parquet as pq
 
+from torch_dataloader_utils.observability import WorkerMetrics
 from torch_dataloader_utils.splits.core import RowRange, Shard
 
 if TYPE_CHECKING:
@@ -46,6 +50,8 @@ def read_split(
     filters: pc.Expression | None = None,
     storage_options: dict | None = None,
     partitioning: str | None = None,
+    metrics: WorkerMetrics | None = None,
+    pbar: Any | None = None,
 ) -> Iterator[pa.RecordBatch]:
     """Read a Shard and yield pyarrow RecordBatches.
 
@@ -58,6 +64,9 @@ def read_split(
         storage_options: Passed to fsspec for filesystem construction.
         partitioning: Partition scheme — "hive" decodes key=value directory segments
             and adds them as columns. None = no partitioning (default).
+        metrics: Optional WorkerMetrics to increment in-place as batches are yielded.
+        pbar: Optional tqdm progress bar; pbar.update(n) called with each batch's
+            row count, pbar.reset(total) called at the start of each split.
 
     Yields:
         pyarrow.RecordBatch
@@ -101,7 +110,32 @@ def read_split(
     total_batches = 0
     for split in shard.splits:
         path = split.file.path
+        fname = path.rsplit("/", 1)[-1]
         logger.debug("Opening file: %s  size=%s bytes", path, split.file.file_size)
+
+        # Estimate bytes for this split
+        split_bytes = 0
+        if split.file.file_size is not None:
+            if split.row_range is None:
+                split_bytes = split.file.file_size
+            elif split.file.record_count:
+                split_bytes = int(
+                    split.file.file_size * split.row_range.length / split.file.record_count
+                )
+            else:
+                split_bytes = split.file.file_size
+
+        # Determine total rows for pbar (for percentage display)
+        split_total_rows: int | None = None
+        if split.row_range is not None:
+            split_total_rows = split.row_range.length
+        elif split.file.record_count is not None:
+            split_total_rows = split.file.record_count
+
+        # Reset pbar for this file
+        if pbar is not None:
+            pbar.reset(total=split_total_rows)
+            pbar.set_description(f"W{metrics.worker_id if metrics else '?'} | {fname}")
 
         arrow_fs, resolved_path = _get_arrow_filesystem(path, opts)
 
@@ -138,18 +172,41 @@ def read_split(
             gen = scanner.to_batches()
 
         file_batches = 0
-        last_batch = None
+        file_rows = 0
+        t_file = time.perf_counter()
         for batch in gen:
             file_batches += 1
+            file_rows += batch.num_rows
             total_batches += 1
-            last_batch = batch
+            if metrics is not None:
+                metrics.rows_read += batch.num_rows
+                metrics.batches_read += 1
+            if pbar is not None:
+                pbar.update(batch.num_rows)
             yield batch
 
-        logger.debug(
-            "Finished file: %s  batches=%d  rows_last_batch=%d",
-            path,
+        file_elapsed = time.perf_counter() - t_file
+        if metrics is not None:
+            metrics.files_read += 1
+            metrics.bytes_read += split_bytes
+
+        logger.info(
+            "Worker %s file done: %s  rows=%d  batches=%d  bytes_est=%d  elapsed=%.3fs",
+            metrics.worker_id if metrics else "?",
+            fname,
+            file_rows,
             file_batches,
-            last_batch.num_rows if last_batch is not None else 0,
+            split_bytes,
+            file_elapsed,
+            extra={
+                "event": "file_done",
+                "worker_id": metrics.worker_id if metrics else None,
+                "path": path,
+                "rows_read": file_rows,
+                "batches_read": file_batches,
+                "bytes_read": split_bytes,
+                "elapsed_sec": file_elapsed,
+            },
         )
 
     logger.info(

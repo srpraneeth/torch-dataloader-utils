@@ -1,14 +1,18 @@
-import inspect
+from __future__ import annotations
+
 import logging
 import os
+import time
 from collections.abc import Callable, Iterator
 from typing import Any
 
 import pyarrow as pa
 import pyarrow.compute as pc
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader
 
+from torch_dataloader_utils.dataset.base import BaseDataset
 from torch_dataloader_utils.dataset.output import convert_batch
+from torch_dataloader_utils.observability import WorkerMetrics, fmt_bytes
 from torch_dataloader_utils.splits.core import IcebergDataFileInfo, Shard, SplitStrategy
 from torch_dataloader_utils.splits.round_robin import RoundRobinSplitStrategy
 from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy, parse_bytes
@@ -333,7 +337,7 @@ def _read_task_with_deletes(
             offset += batch_size
 
 
-class IcebergDataset(IterableDataset):
+class IcebergDataset(BaseDataset):
     """PyTorch IterableDataset for Apache Iceberg tables.
 
     Resolves the table to a list of data files via pyiceberg, then distributes
@@ -350,7 +354,7 @@ class IcebergDataset(IterableDataset):
 
     IcebergDataset detects whether any scan task carries delete files at construction
     time. When deletes are present, each worker reconnects to the catalog inside
-    __iter__ using the stored catalog_config (plain dict — picklable) and uses
+    _iter_shard using the stored catalog_config (plain dict — picklable) and uses
     pyiceberg's ArrowScan to apply position deletes before yielding batches.
     When no delete files exist, it uses the direct pyarrow reader (faster).
 
@@ -409,6 +413,8 @@ class IcebergDataset(IterableDataset):
         collate_fn: Callable | None = None,
         num_ranks: int = 1,
         rank: int = 0,
+        show_progress: bool = False,
+        progress_interval_sec: float = 120.0,
     ) -> None:
         _require_pyiceberg()
 
@@ -421,6 +427,15 @@ class IcebergDataset(IterableDataset):
                 "PyTorch's default collate cannot handle this type. "
                 "Pass a custom collate_fn or use output_format='torch'."
             )
+
+        if show_progress:
+            try:
+                import tqdm as _tqdm  # noqa: F401
+            except ImportError as exc:
+                raise ImportError(
+                    "show_progress=True requires tqdm. "
+                    "Install it with: pip install tqdm"
+                ) from exc
 
         self._table_identifier = table
         self._catalog_config = catalog_config
@@ -480,67 +495,29 @@ class IcebergDataset(IterableDataset):
             if split_strategy is not None
             else _auto_select_strategy(files, shuffle, shuffle_seed, split_bytes, split_rows)
         )
-        self._epoch: int = 0
-        self._splits: list[Shard] = self._generate_splits()
 
-    def _generate_splits(self) -> list[Shard]:
-        n = max(self._num_workers, 1)
-        sig = inspect.signature(self._strategy.generate)
-        if "num_ranks" in sig.parameters:
-            return self._strategy.generate(
-                self._files,
-                num_workers=n,
-                epoch=self._epoch,
-                num_ranks=self._num_ranks,
-                rank=self._rank,
-            )
-        return self._strategy.generate(self._files, num_workers=n, epoch=self._epoch)
-
-    def set_epoch(self, epoch: int) -> None:
-        """Set the epoch for shuffle reproducibility. Call before each epoch when shuffle=True."""
-        self._epoch = epoch
-        self._splits = self._generate_splits()
-        logger.info(
-            "Regenerated splits for epoch %d  strategy=%s  num_workers=%d",
-            epoch,
-            type(self._strategy).__name__,
-            self._num_workers,
+        self._init_splits_and_observability(
+            epoch=0,
+            show_progress=show_progress,
+            progress_interval_sec=progress_interval_sec,
         )
 
-    def __iter__(self) -> Iterator[Any]:
-        from torch.utils.data import get_worker_info
-
-        from torch_dataloader_utils.format.reader import read_split
-
-        info = get_worker_info()
-        worker_id = info.id if info is not None else 0
-
-        if worker_id >= len(self._splits):
-            logger.debug(
-                "Worker %d: no split assigned (%d split(s) for %d worker(s))",
-                worker_id,
-                len(self._splits),
-                self._num_workers,
-            )
-            return
-
-        shard = self._splits[worker_id]
-        logger.info(
-            "Worker %d: assigned shard %d with %d split(s)  has_deletes=%s",
-            worker_id,
-            shard.id,
-            len(shard.splits),
-            self._has_deletes,
-        )
-
+    def _iter_shard(
+        self,
+        shard: Shard,
+        worker_id: int,
+        metrics: WorkerMetrics,
+        pbar: Any,
+    ) -> Iterator[Any]:
         if self._has_deletes:
             for split in shard.splits:
                 path = split.file.path
                 logger.debug(
-                    "Worker %d: reading with ArrowScan (deletes) → %s",
-                    worker_id,
-                    path,
+                    "Worker %d: reading with ArrowScan (deletes) → %s", worker_id, path
                 )
+                file_rows = 0
+                file_batches = 0
+                t_file = time.perf_counter()
                 for batch in _read_task_with_deletes(
                     data_file_path=path,
                     table_identifier=self._table_identifier,
@@ -550,15 +527,44 @@ class IcebergDataset(IterableDataset):
                     filters=self._filters,
                     batch_size=self._batch_size,
                 ):
+                    metrics.rows_read += len(batch)
+                    metrics.batches_read += 1
+                    file_rows += len(batch)
+                    file_batches += 1
+                    if pbar is not None:
+                        pbar.update(len(batch))
                     yield convert_batch(batch, self._output_format)
+                metrics.files_read += 1
+                file_size = split.file.file_size or 0
+                metrics.bytes_read += file_size
+                logger.info(
+                    "Worker %d file done: %s  rows=%s  batches=%d  bytes_est=%s  elapsed=%.3fs",
+                    worker_id,
+                    path.rsplit("/", 1)[-1],
+                    f"{file_rows:,}",
+                    file_batches,
+                    fmt_bytes(file_size),
+                    time.perf_counter() - t_file,
+                    extra={
+                        "event": "file_done",
+                        "worker_id": worker_id,
+                        "file": path,
+                        "rows_read": file_rows,
+                        "batches_read": file_batches,
+                        "bytes_read": file_size,
+                    },
+                )
         else:
-            # Fast path: direct pyarrow reader with sub-file splitting support
+            from torch_dataloader_utils.format.reader import read_split
+
             for batch in read_split(
                 shard,
                 format=self._format,
                 batch_size=self._batch_size,
                 columns=self._columns,
                 filters=self._filters,
+                metrics=metrics,
+                pbar=pbar,
             ):
                 yield convert_batch(batch, self._output_format)
 
@@ -582,7 +588,9 @@ class IcebergDataset(IterableDataset):
         collate_fn: Callable | None = None,
         num_ranks: int = 1,
         rank: int = 0,
-    ) -> tuple[DataLoader, "IcebergDataset"]:
+        show_progress: bool = False,
+        progress_interval_sec: float = 120.0,
+    ) -> tuple[DataLoader, IcebergDataset]:
         """Create a DataLoader for an Iceberg table.
 
         Returns (DataLoader, dataset) — keep a reference to dataset to call
@@ -594,15 +602,30 @@ class IcebergDataset(IterableDataset):
             num_workers = max(1, (os.cpu_count() or 1) - 1)
             logger.info("Auto-detected num_workers=%d", num_workers)
 
+        col_str = ", ".join(columns) if columns else "all"
         logger.info(
-            "IcebergDataset.create_dataloader: table=%s  num_workers=%d  "
-            "batch_size=%d  output_format=%s  shuffle=%s  snapshot_id=%s",
+            "IcebergDataset ready\n"
+            "  table        : %s\n"
+            "  workers      : %d   (rank %d / %d)\n"
+            "  batch_size   : %d\n"
+            "  strategy     : %s\n"
+            "  shuffle      : %s  seed=%d\n"
+            "  snapshot_id  : %s\n"
+            "  columns      : %s\n"
+            "  filters      : %s\n"
+            "  output_fmt   : %s",
             table,
             num_workers,
+            rank,
+            num_ranks,
             batch_size,
-            output_format,
+            split_strategy.__class__.__name__ if split_strategy else "TargetSizeSplitStrategy",
             shuffle,
-            snapshot_id,
+            shuffle_seed,
+            snapshot_id if snapshot_id is not None else "current",
+            col_str,
+            "yes" if filters is not None else "none",
+            output_format,
         )
 
         dataset = cls(
@@ -623,6 +646,8 @@ class IcebergDataset(IterableDataset):
             collate_fn=collate_fn,
             num_ranks=num_ranks,
             rank=rank,
+            show_progress=show_progress,
+            progress_interval_sec=progress_interval_sec,
         )
 
         effective_collate = collate_fn

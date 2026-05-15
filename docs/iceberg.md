@@ -145,3 +145,28 @@ loader, _ = IcebergDataset.create_dataloader(
     snapshot_id=8271638172635,    # pin to a historical snapshot
 )
 ```
+
+---
+
+## Observability
+
+`IcebergDataset` has the same full observability as `StructuredDataset`: startup summary, split assignment table, load balance warnings, per-file logs, progress bars, and epoch metrics.
+
+```python
+loader, dataset = IcebergDataset.create_dataloader(
+    table="my_db.my_table",
+    catalog_config=catalog_config,
+    show_progress=True,
+    progress_interval_sec=30,
+)
+
+for epoch in range(num_epochs):
+    dataset.set_epoch(epoch)
+    for batch in loader:
+        train(batch)
+
+    for m in dataset.get_metrics():
+        print(f"worker={m.worker_id}  rows={m.rows_read:,}")
+```
+
+See **[Observability](observability.md)** for the full reference.

@@ -1,15 +1,18 @@
-import inspect
+from __future__ import annotations
+
 import logging
 import os
 from collections.abc import Callable, Iterator
 from typing import Any
 
 import pyarrow.compute as pc
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader
 
+from torch_dataloader_utils.dataset.base import BaseDataset
 from torch_dataloader_utils.dataset.output import convert_batch
 from torch_dataloader_utils.filesystem.discovery import discover_files
 from torch_dataloader_utils.format.reader import SUPPORTED_FORMATS, read_split
+from torch_dataloader_utils.observability import WorkerMetrics, fmt_bytes
 from torch_dataloader_utils.splits.core import DataFileInfo, Shard, SplitStrategy
 from torch_dataloader_utils.splits.round_robin import RoundRobinSplitStrategy
 from torch_dataloader_utils.splits.target_size import TargetSizeSplitStrategy, parse_bytes
@@ -38,7 +41,7 @@ def _auto_select_strategy(
     return RoundRobinSplitStrategy(shuffle=shuffle, seed=shuffle_seed)
 
 
-class StructuredDataset(IterableDataset):
+class StructuredDataset(BaseDataset):
     """PyTorch IterableDataset for structured file formats on any fsspec filesystem.
 
     Splits are generated once in the main process before workers start.
@@ -73,6 +76,8 @@ class StructuredDataset(IterableDataset):
         partitioning: str | None = None,
         num_ranks: int = 1,
         rank: int = 0,
+        show_progress: bool = False,
+        progress_interval_sec: float = 120.0,
     ) -> None:
         if format not in SUPPORTED_FORMATS:
             supported = ", ".join(sorted(SUPPORTED_FORMATS))
@@ -94,6 +99,15 @@ class StructuredDataset(IterableDataset):
                 "Pass a custom collate_fn or use output_format='torch'."
             )
 
+        if show_progress:
+            try:
+                import tqdm as _tqdm  # noqa: F401
+            except ImportError as exc:
+                raise ImportError(
+                    "show_progress=True requires tqdm. "
+                    "Install it with: pip install tqdm"
+                ) from exc
+
         self._files = files
         self._format = format
         self._batch_size = batch_size
@@ -114,73 +128,19 @@ class StructuredDataset(IterableDataset):
         self._num_ranks = num_ranks
         self._rank = rank
 
-        # Splits are generated in the main process and stored as immutable data.
-        # Workers receive a pickled copy — __iter__ only reads, never writes.
-        self._epoch: int = 0
-        self._splits: list[Shard] = self._generate_splits()
-
-    def _generate_splits(self) -> list[Shard]:
-        n = max(self._num_workers, 1)
-        sig = inspect.signature(self._strategy.generate)
-        if "num_ranks" in sig.parameters:
-            return self._strategy.generate(
-                self._files,
-                num_workers=n,
-                epoch=self._epoch,
-                num_ranks=self._num_ranks,
-                rank=self._rank,
-            )
-        return self._strategy.generate(self._files, num_workers=n, epoch=self._epoch)
-
-    def set_epoch(self, epoch: int) -> None:
-        """Set the epoch for shuffle reproducibility.
-
-        Call this in the main process before each DataLoader iteration:
-
-            for epoch in range(num_epochs):
-                dataset.set_epoch(epoch)
-                for batch in loader:
-                    ...
-
-        Has no effect when shuffle=False.
-        """
-        self._epoch = epoch
-        self._splits = self._generate_splits()
-        logger.info(
-            "Regenerated splits for epoch %d  strategy=%s  num_workers=%d",
-            epoch,
-            type(self._strategy).__name__,
-            self._num_workers,
+        self._init_splits_and_observability(
+            epoch=0,
+            show_progress=show_progress,
+            progress_interval_sec=progress_interval_sec,
         )
 
-    def __iter__(self) -> Iterator[Any]:
-        from torch.utils.data import get_worker_info
-
-        info = get_worker_info()
-        worker_id = info.id if info is not None else 0
-
-        if worker_id >= len(self._splits):
-            # More workers than splits — this worker has nothing to do
-            logger.debug(
-                "Worker %d: no split assigned (only %d split(s) for %d worker(s))"
-                " — yielding nothing",
-                worker_id,
-                len(self._splits),
-                self._num_workers,
-            )
-            return
-
-        shard = self._splits[worker_id]
-        file_paths = [s.file.path for s in shard.splits]
-        logger.info(
-            "Worker %d: assigned shard %d with %d split(s)",
-            worker_id,
-            shard.id,
-            len(shard.splits),
-        )
-        for path in file_paths:
-            logger.debug("Worker %d: shard %d file → %s", worker_id, shard.id, path)
-
+    def _iter_shard(
+        self,
+        shard: Shard,
+        worker_id: int,
+        metrics: WorkerMetrics,
+        pbar: Any,
+    ) -> Iterator[Any]:
         for batch in read_split(
             shard,
             format=self._format,
@@ -189,6 +149,8 @@ class StructuredDataset(IterableDataset):
             filters=self._filters,
             storage_options=self._storage_options,
             partitioning=self._partitioning,
+            metrics=metrics,
+            pbar=pbar,
         ):
             yield convert_batch(batch, self._output_format)
 
@@ -212,7 +174,9 @@ class StructuredDataset(IterableDataset):
         partitioning: str | None = None,
         num_ranks: int = 1,
         rank: int = 0,
-    ) -> tuple[DataLoader, "StructuredDataset"]:
+        show_progress: bool = False,
+        progress_interval_sec: float = 120.0,
+    ) -> tuple[DataLoader, StructuredDataset]:
         """Create a DataLoader for structured files at the given path.
 
         Returns (DataLoader, dataset) — keep a reference to dataset to call
@@ -222,32 +186,58 @@ class StructuredDataset(IterableDataset):
             num_workers = max(1, (os.cpu_count() or 1) - 1)
             logger.info("Auto-detected num_workers=%d", num_workers)
 
+        files = discover_files(path, storage_options=storage_options)
+
+        total_bytes = sum(f.file_size for f in files if f.file_size is not None)
+        col_str = ", ".join(columns) if columns else "all"
         logger.info(
-            "create_dataloader: path=%s  format=%s  num_workers=%d  batch_size=%d  "
-            "output_format=%s  shuffle=%s  columns=%s  filters=%s",
+            "DataLoader ready\n"
+            "  path         : %s\n"
+            "  format       : %s\n"
+            "  files        : %d  (%s total)\n"
+            "  workers      : %d   (rank %d / %d)\n"
+            "  batch_size   : %d\n"
+            "  strategy     : %s\n"
+            "  shuffle      : %s  seed=%d\n"
+            "  columns      : %s\n"
+            "  filters      : %s\n"
+            "  output_fmt   : %s",
             path,
             format,
+            len(files),
+            fmt_bytes(total_bytes),
             num_workers,
+            rank,
+            num_ranks,
             batch_size,
-            output_format,
+            split_strategy.__class__.__name__ if split_strategy else "TargetSizeSplitStrategy",
             shuffle,
-            columns if columns else "all",
+            shuffle_seed,
+            col_str,
             "yes" if filters is not None else "none",
+            output_format,
         )
-
-        files = discover_files(path, storage_options=storage_options)
-        logger.info("Discovered %d file(s) at %s", len(files), path)
 
         if files:
             try:
-                if format == "parquet":
-                    import pyarrow.parquet as pq
+                import fsspec
+                import pyarrow.dataset as pads
+                import pyarrow.fs as pafs
+                import pyarrow.parquet as pq
 
-                    schema = pq.read_schema(files[0].path)
+                fs, resolved = fsspec.url_to_fs(files[0].path, **(storage_options or {}))
+                if fs.protocol in ("file", "local") or (
+                    isinstance(fs.protocol, tuple) and "file" in fs.protocol
+                ):
+                    arrow_fs, rpath = None, files[0].path
                 else:
-                    import pyarrow.dataset as pads
+                    arrow_fs = pafs.PyFileSystem(pafs.FSSpecHandler(fs))
+                    rpath = resolved
 
-                    schema = pads.dataset(files[0].path, format=format).schema
+                if format == "parquet":
+                    schema = pq.read_schema(rpath, filesystem=arrow_fs)
+                else:
+                    schema = pads.dataset(rpath, format=format, filesystem=arrow_fs).schema
                 field_summary = ", ".join(f"{f.name}: {f.type}" for f in schema)
                 logger.info("Inferred schema from %s: [%s]", files[0].path, field_summary)
             except Exception:
@@ -271,11 +261,10 @@ class StructuredDataset(IterableDataset):
             partitioning=partitioning,
             num_ranks=num_ranks,
             rank=rank,
+            show_progress=show_progress,
+            progress_interval_sec=progress_interval_sec,
         )
 
-        # For non-torch output formats, PyTorch's default collate would convert
-        # numpy arrays and dicts back to tensors. Use a passthrough collate unless
-        # the user has provided their own.
         effective_collate = collate_fn
         if effective_collate is None and output_format != "torch":
             effective_collate = lambda x: x  # noqa: E731

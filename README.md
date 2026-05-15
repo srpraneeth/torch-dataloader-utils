@@ -163,6 +163,8 @@ loader, dataset = StructuredDataset.create_dataloader(
     partitioning="hive",                      # None | "hive" — decode key=value directory segments
     num_ranks=1,                              # total DDP world size (default 1 = single process)
     rank=0,                                   # this process's global DDP rank (default 0)
+    show_progress=False,                      # tqdm progress bar per worker (requires tqdm)
+    progress_interval_sec=120.0,              # how often tqdm updates (seconds)
 )
 ```
 
@@ -372,6 +374,23 @@ Missing optional dependencies raise a clear `ImportError` with the install comma
 
 ---
 
+## Benchmarks
+
+Key results from the [full benchmark report](docs/benchmarks.md):
+
+| Scenario | Result | vs baseline |
+|----------|--------|-------------|
+| Throughput, `num_workers=0` | **3.05M rows/s** | 1.01× vs `naive_iterable` |
+| Load balance (32× unequal files, nw=4) | **0% imbalance** | vs 116.7% manual sharding |
+| Single large file, `num_workers=8` | **0.51s/epoch** | 5.87× faster than manual |
+| DDP I/O efficiency at 16 ranks | **1× I/O per rank** | vs 16× `naive_ddp` |
+| Column projection (2 of 66 cols) | **10.6× faster** | 33M vs 3.1M rows/s |
+| Startup latency (50-file, 25M rows) | **0.791s** to first batch | <10ms overhead vs 4-file dataset |
+
+Sub-file row-group splitting (S3) and rank-aware sharding (S4) are the headline wins — both eliminate idle workers and wasted I/O that the naive approach cannot avoid. Column projection (S5) shows the benefit of pyarrow's native I/O-level pushdown: a hand-written baseline that reads all 66 columns and selects in Python sees no speedup.
+
+---
+
 ## Challenges
 
 ### Worker Count at Split Time
@@ -449,6 +468,7 @@ True record-level shuffle requires either loading all data into memory or mainta
 - ORC support for Iceberg tables — `_detect_format` handles ORC-backed Iceberg tables
 - Rank-aware DDP sharding — `num_ranks` / `rank` params on `TargetSizeSplitStrategy`, `RoundRobinSplitStrategy`, `StructuredDataset`, and `IcebergDataset`; interleaved assignment `all_splits[rank::num_ranks]`
 - Multi-worker DataLoader integration tests on Linux CI
+- Observability — `WorkerMetrics` per worker (`rows_read`, `bytes_read`, `files_read`, `elapsed_sec`), epoch summary at INFO, load-balance warning, optional `tqdm` progress bars via `show_progress`; `dataset.get_metrics()` returns structured results; `BaseDataset` ABC provides this to all current and future datasets automatically
 
 **Pending:**
 
@@ -456,7 +476,6 @@ True record-level shuffle requires either loading all data into memory or mainta
 - Row-level interleaving across files within a split
 - Mid-epoch checkpoint and resume — persist which splits have been fully consumed so that on crash/restart the DataLoader can skip already-processed splits and resume from the partial one; epoch number checkpointed alongside model weights for deterministic shuffle resumption
 - GCS and Azure real backend CI tests — Docker Compose-based GCS (`fake-gcs-server`) and Azure (Azurite)
-- Metrics: rows read, bytes read, worker utilization
 - Build stateful dataloader `state_dict()` / `load_state_dict()` for checkpointing/resuming
 
 ## V3 Scope

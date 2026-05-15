@@ -3,6 +3,8 @@ import logging
 import random
 from collections.abc import Iterator
 
+import fsspec
+import pyarrow.fs as pafs
 import pyarrow.orc as orc
 import pyarrow.parquet as pq
 
@@ -55,7 +57,14 @@ def _parquet_chunks(
     When target_rows is set it takes precedence over target_bytes.
     """
     try:
-        meta = pq.read_metadata(file.path)
+        fs, resolved = fsspec.url_to_fs(file.path)
+        if fs.protocol in ("file", "local") or (
+            isinstance(fs.protocol, tuple) and "file" in fs.protocol
+        ):
+            meta = pq.read_metadata(file.path)
+        else:
+            arrow_fs = pafs.PyFileSystem(pafs.FSSpecHandler(fs))
+            meta = pq.read_metadata(resolved, filesystem=arrow_fs)
     except Exception as e:
         logger.warning(
             "Could not read Parquet metadata for %s (%s) — treating as single chunk",
@@ -261,12 +270,23 @@ class TargetSizeSplitStrategy:
             def _fmt(sp: Split) -> str:
                 fname = sp.file.path.rsplit("/", 1)[-1]
                 if sp.row_range is not None:
-                    return f"{fname}[{sp.row_range.offset},{sp.row_range.offset + sp.row_range.length})"
+                    end = sp.row_range.offset + sp.row_range.length
+                    return f"{fname}[{sp.row_range.offset},{end})"
                 return f"{fname}[full]"
-            logger.info("Total chunks: %d  %s", len(all_splits), "  ".join(_fmt(sp) for sp in all_splits))
+            logger.info(
+                "Total chunks: %d  %s",
+                len(all_splits),
+                "  ".join(_fmt(sp) for sp in all_splits),
+            )
         rank_splits = all_splits[rank::num_ranks]
         if logger.isEnabledFor(logging.INFO):
-            logger.info("Assigning to rank %d/%d: %d chunks  %s", rank, num_ranks, len(rank_splits), "  ".join(_fmt(sp) for sp in rank_splits))
+            logger.info(
+                "Assigning to rank %d/%d: %d chunks  %s",
+                rank,
+                num_ranks,
+                len(rank_splits),
+                "  ".join(_fmt(sp) for sp in rank_splits),
+            )
 
         # Greedy min-heap: always assign next split to the least-loaded worker
         heap = [(0, i) for i in range(num_workers)]
@@ -288,6 +308,12 @@ class TargetSizeSplitStrategy:
                     sp.row_range.length if sp.row_range else (sp.file.record_count or 0)
                     for sp in shard.splits
                 )
-                logger.info("Shard %d: %d chunks  %d rows  %s", shard.id, len(shard.splits), total_rows, "  ".join(_fmt(sp) for sp in shard.splits))
+                logger.info(
+                    "Shard %d: %d chunks  %d rows  %s",
+                    shard.id,
+                    len(shard.splits),
+                    total_rows,
+                    "  ".join(_fmt(sp) for sp in shard.splits),
+                )
 
         return shards

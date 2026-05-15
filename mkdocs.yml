@@ -31,6 +31,8 @@ markdown_extensions:
       anchor_linenums: true
   - pymdownx.superfences
   - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
   - admonition
   - tables
   - toc:
@@ -45,6 +47,7 @@ nav:
     - Splits & Workers: splits.md
     - Training Stack: training.md
     - Distributed Data Loading: distributed.md
+  - Observability: observability.md
   - Benchmarks: benchmarks.md
   - Limitations: limitations.md
   - Roadmap: roadmap.md

@@ -25,6 +25,8 @@ loader, dataset = StructuredDataset.create_dataloader(
     partitioning="hive",                      # None | "hive"
     num_ranks=1,                              # total DDP world size (default 1 = single process)
     rank=0,                                   # this process's global DDP rank (default 0)
+    show_progress=False,                      # tqdm progress bars per worker per file
+    progress_interval_sec=120,                # how often to refresh bars (seconds)
 )
 ```
 
@@ -51,6 +53,8 @@ Returns `(DataLoader, dataset)`. Keep a reference to `dataset` to call `set_epoc
 | `partitioning` | `str \| None` | `None` | `"hive"` decodes `key=value` directory segments as columns |
 | `num_ranks` | `int` | `1` | Total DDP world size. Default `1` = single-process (V1 behaviour) |
 | `rank` | `int` | `0` | This process's global DDP rank (0-indexed). Default `0` |
+| `show_progress` | `bool` | `False` | Show tqdm progress bars (one per worker per file). Requires `tqdm` |
+| `progress_interval_sec` | `float` | `120.0` | How often to refresh progress bars (seconds) |
 
 ## Epoch Reshuffling
 
@@ -177,3 +181,11 @@ ds = StructuredDataset(files=..., format="parquet", ...)
 loader = DataLoader(ds, batch_size=None, num_workers=4)
 loader = accelerator.prepare(loader)
 ```
+
+---
+
+## Observability
+
+`StructuredDataset` emits structured logs at every stage — startup summary, split assignment table, load balance warnings, per-file logs, progress bars, and epoch summaries.
+
+See **[Observability](observability.md)** for the full reference.
