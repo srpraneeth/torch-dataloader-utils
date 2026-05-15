@@ -155,6 +155,7 @@ loader, dataset = StructuredDataset.create_dataloader(
     filters=pc.field("date") > "2024-01-01",  # predicate pushdown via pyarrow
     shuffle=True,
     shuffle_seed=42,
+    shuffle_buffer_size=50_000,              # record-level shuffle buffer (rows per worker). None = off
     split_bytes="128MiB",                     # target chunk size (default 128 MiB)
     split_rows=None,                          # target rows per chunk (overrides split_bytes)
     split_strategy=None,                      # None = auto-select TargetSizeSplitStrategy
@@ -470,10 +471,9 @@ True record-level shuffle requires either loading all data into memory or mainta
 - Multi-worker DataLoader integration tests on Linux CI
 - Observability — `WorkerMetrics` per worker (`rows_read`, `bytes_read`, `files_read`, `elapsed_sec`), epoch summary at INFO, load-balance warning, optional `tqdm` progress bars via `show_progress`; `dataset.get_metrics()` returns structured results; `BaseDataset` ABC provides this to all current and future datasets automatically
 - Mid-epoch checkpoint and resume — `dataset.state_dict()` captures completed shard content (file paths + row ranges, not just worker IDs); `dataset.load_state_dict(state)` validates against current splits and raises `CheckpointMismatchError` with a specific diagnosis if `num_workers`, `shuffle_seed`, or the file list changed; completed shards skipped with zero I/O on resume; at most one in-progress shard re-reads from scratch
+- Record-level shuffle via configurable shuffle buffer — `shuffle_buffer_size=N` adds a per-worker reservoir buffer that mixes rows across chunks; independent of chunk-level `shuffle`; deterministic per epoch via `shuffle_seed`; buffer is in-memory per worker, no IPC until the completed batch crosses the DataLoader pipe
 
 **Pending:**
-
-- Record-level shuffle via configurable shuffle buffer
 - Row-level interleaving across files within a split
 - GCS and Azure real backend CI tests — Docker Compose-based GCS (`fake-gcs-server`) and Azure (Azurite)
 

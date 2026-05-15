@@ -7,7 +7,10 @@ import queue
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import numpy as np
 
 from torch.utils.data import IterableDataset
 
@@ -21,6 +24,57 @@ from torch_dataloader_utils.observability import (
 from torch_dataloader_utils.splits.core import Shard
 
 logger = logging.getLogger(__name__)
+
+
+def _shuffle_buffer_iter(
+    source: Iterator[Any],
+    buffer_size: int,
+    batch_size: int,
+    rng: "np.random.Generator",
+) -> Iterator[Any]:
+    """Reservoir-style streaming shuffle buffer operating on Arrow RecordBatches."""
+    import numpy as np
+    import pyarrow as pa
+
+    buffer: pa.Table | None = None
+    source_iter = iter(source)
+    exhausted = False
+
+    def _extend(tbl: pa.Table | None, batch: Any) -> pa.Table:
+        t = batch if isinstance(batch, pa.Table) else pa.Table.from_batches([batch])
+        return pa.concat_tables([tbl, t]) if tbl is not None else t
+
+    def _emit_one(tbl: pa.Table) -> tuple[Any, pa.Table]:
+        n = min(batch_size, len(tbl))
+        idx = np.sort(rng.choice(len(tbl), size=n, replace=False))
+        out = tbl.take(idx)
+        mask = np.ones(len(tbl), dtype=bool)
+        mask[idx] = False
+        return out.to_batches()[0], tbl.filter(pa.array(mask))
+
+    # Fill initial buffer
+    while not exhausted and (buffer is None or len(buffer) < buffer_size):
+        try:
+            buffer = _extend(buffer, next(source_iter))
+        except StopIteration:
+            exhausted = True
+
+    # Stream: emit one batch, refill to buffer_size
+    while not exhausted:
+        out, buffer = _emit_one(buffer)
+        yield out
+        while not exhausted and len(buffer) < buffer_size:
+            try:
+                buffer = _extend(buffer, next(source_iter))
+            except StopIteration:
+                exhausted = True
+
+    # Drain remainder with full permutation shuffle
+    if buffer is not None and len(buffer) > 0:
+        perm = rng.permutation(len(buffer))
+        for i in range(0, len(buffer), batch_size):
+            chunk = np.sort(perm[i : i + batch_size])
+            yield buffer.take(chunk).to_batches()[0]
 
 
 class CheckpointMismatchError(Exception):
@@ -84,11 +138,13 @@ class BaseDataset(IterableDataset, ABC):
         epoch: int = 0,
         show_progress: bool = False,
         progress_interval_sec: float = 120.0,
+        shuffle_buffer_size: int = 0,
     ) -> None:
         """Finish initialisation: set up metrics queues and generate the first splits."""
         self._epoch = epoch
         self._show_progress = show_progress
         self._progress_interval_sec = progress_interval_sec
+        self._shuffle_buffer_size: int = max(0, shuffle_buffer_size or 0)
         # Two-path metrics collection:
         # - num_workers=0: __iter__ runs in the main process — direct list append.
         # - num_workers>0: workers are separate processes — use mp.Queue.
@@ -243,6 +299,15 @@ class BaseDataset(IterableDataset, ABC):
                 break
 
     # ------------------------------------------------------------------
+    # Output conversion
+    # ------------------------------------------------------------------
+
+    def _convert_output(self, batch: Any) -> Any:
+        from torch_dataloader_utils.dataset.output import convert_batch
+
+        return convert_batch(batch, self._output_format)
+
+    # ------------------------------------------------------------------
     # Progress bars
     # ------------------------------------------------------------------
 
@@ -301,7 +366,15 @@ class BaseDataset(IterableDataset, ABC):
 
         t0 = time.perf_counter()
         try:
-            yield from self._iter_shard(shard, worker_id, metrics, pbar)
+            source = self._iter_shard(shard, worker_id, metrics, pbar)
+            if self._shuffle_buffer_size > 0:
+                import numpy as np
+
+                rng_seed = self._shuffle_seed * 100_000 + self._epoch * 1_000 + worker_id
+                rng = np.random.default_rng(rng_seed)
+                source = _shuffle_buffer_iter(source, self._shuffle_buffer_size, self._batch_size, rng)
+            for batch in source:
+                yield self._convert_output(batch)
         finally:
             metrics.elapsed_sec = time.perf_counter() - t0
             if pbar is not None:

@@ -100,7 +100,7 @@ for epoch in range(num_epochs):
 
 - Call `set_epoch()` in the **main process** before each epoch
 - With `shuffle=False`, `set_epoch()` can be omitted — splits are always generated in the same deterministic order regardless of epoch number
-- No record-level shuffle — chunk-level shuffle is sufficient for most training workloads
+- For record-level shuffle (mixing rows across chunks), add `shuffle_buffer_size=N` — see [StructuredDataset docs](structured.md#record-level-shuffle)
 
 ## Rank-Aware DDP Sharding
 

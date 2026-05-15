@@ -44,6 +44,7 @@ Returns `(DataLoader, dataset)`. Keep a reference to `dataset` to call `set_epoc
 | `filters` | `pc.Expression \| None` | `None` | Row-level predicate pushdown via pyarrow |
 | `shuffle` | `bool` | `False` | Shuffle chunks before assigning to workers |
 | `shuffle_seed` | `int` | `42` | Base seed — actual seed is `shuffle_seed + epoch` |
+| `shuffle_buffer_size` | `int \| None` | `None` | Record-level shuffle buffer size (rows). `None` = no record shuffle |
 | `split_bytes` | `int \| str \| None` | `None` | Target bytes per chunk. Strings like `"128MiB"` accepted. `None` = 128 MiB |
 | `split_rows` | `int \| None` | `None` | Target rows per chunk. Overrides `split_bytes` |
 | `split_strategy` | `SplitStrategy \| None` | `None` | Custom strategy. `None` = auto-select |
@@ -74,7 +75,44 @@ for epoch in range(num_epochs):
 
 Call `set_epoch()` in the **main process** before each epoch, not inside a worker.
 
-## Custom Split Strategy
+## Record-Level Shuffle
+
+`shuffle=True` randomises chunk order — but within a chunk, rows are read in file order. If your Parquet files are sorted by timestamp or user ID, consecutive batches will still be correlated.
+
+`shuffle_buffer_size` adds a per-worker reservoir buffer that mixes rows across chunks:
+
+```python
+loader, dataset = StructuredDataset.create_dataloader(
+    path="s3://bucket/data/",
+    format="parquet",
+    shuffle=True,               # chunk-level: reorders file chunks across epochs
+    shuffle_buffer_size=50_000, # record-level: mixes rows within each worker's stream
+    num_workers=4,
+)
+```
+
+The two levels are independent — use either or both:
+
+| `shuffle` | `shuffle_buffer_size` | Effect |
+|-----------|----------------------|--------|
+| `True` | `None` | Chunk order randomised, rows in file order |
+| `False` | `50_000` | Fixed chunk order, rows mixed within each worker |
+| `True` | `50_000` | Chunk order randomised + rows mixed (recommended for training) |
+
+**Buffer sizing:**
+
+| `shuffle_buffer_size` | 20 float32 cols | 100 float32 cols |
+|-----------------------|-----------------|------------------|
+| 10,000 rows | 0.8 MB / worker | 4 MB / worker |
+| 50,000 rows | 4 MB / worker | 20 MB / worker |
+| 100,000 rows | 8 MB / worker | 40 MB / worker |
+
+With `num_workers=8` and `shuffle_buffer_size=50_000` (100 cols): 8 × 20 MB = 160 MB total. For full shuffle quality set `shuffle_buffer_size` to `dataset_size / num_workers`.
+
+!!! note "Memory lives in worker processes"
+    Each worker maintains its own independent buffer. No IPC occurs until a completed output batch crosses the DataLoader pipe — the buffer is entirely local to the worker heap.
+
+
 
 ```python
 from torch_dataloader_utils.splits.core import DataFileInfo, Shard

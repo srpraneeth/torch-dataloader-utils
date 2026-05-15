@@ -9,7 +9,6 @@ import pyarrow.compute as pc
 from torch.utils.data import DataLoader
 
 from torch_dataloader_utils.dataset.base import BaseDataset
-from torch_dataloader_utils.dataset.output import convert_batch
 from torch_dataloader_utils.filesystem.discovery import discover_files
 from torch_dataloader_utils.format.reader import SUPPORTED_FORMATS, read_split
 from torch_dataloader_utils.observability import WorkerMetrics, fmt_bytes
@@ -78,6 +77,7 @@ class StructuredDataset(BaseDataset):
         rank: int = 0,
         show_progress: bool = False,
         progress_interval_sec: float = 120.0,
+        shuffle_buffer_size: int | None = None,
     ) -> None:
         if format not in SUPPORTED_FORMATS:
             supported = ", ".join(sorted(SUPPORTED_FORMATS))
@@ -132,6 +132,7 @@ class StructuredDataset(BaseDataset):
             epoch=0,
             show_progress=show_progress,
             progress_interval_sec=progress_interval_sec,
+            shuffle_buffer_size=shuffle_buffer_size or 0,
         )
 
     def _iter_shard(
@@ -141,7 +142,7 @@ class StructuredDataset(BaseDataset):
         metrics: WorkerMetrics,
         pbar: Any,
     ) -> Iterator[Any]:
-        for batch in read_split(
+        yield from read_split(
             shard,
             format=self._format,
             batch_size=self._batch_size,
@@ -151,8 +152,7 @@ class StructuredDataset(BaseDataset):
             partitioning=self._partitioning,
             metrics=metrics,
             pbar=pbar,
-        ):
-            yield convert_batch(batch, self._output_format)
+        )
 
     @classmethod
     def create_dataloader(
@@ -176,6 +176,7 @@ class StructuredDataset(BaseDataset):
         rank: int = 0,
         show_progress: bool = False,
         progress_interval_sec: float = 120.0,
+        shuffle_buffer_size: int | None = None,
     ) -> tuple[DataLoader, StructuredDataset]:
         """Create a DataLoader for structured files at the given path.
 
@@ -263,6 +264,7 @@ class StructuredDataset(BaseDataset):
             rank=rank,
             show_progress=show_progress,
             progress_interval_sec=progress_interval_sec,
+            shuffle_buffer_size=shuffle_buffer_size,
         )
 
         effective_collate = collate_fn
