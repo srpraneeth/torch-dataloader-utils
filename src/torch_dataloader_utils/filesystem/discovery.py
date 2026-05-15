@@ -153,7 +153,7 @@ def discover_files(
         # Only add the scheme if not already present
         if "://" in raw:
             return raw
-        return f"{scheme}://{raw}"
+        return f"{scheme}://{raw.lstrip('/')}"
 
     # --- build DataFileInfo list ---
     files: list[DataFileInfo] = []
